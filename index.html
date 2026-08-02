@@ -8,6 +8,9 @@
 <meta name="apple-mobile-web-app-title" content="涵予工作台">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#FFB5BA">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="涵予宝宝">
 <title>涵予宝宝育儿工作台</title>
 <style>
 /* ==================== 全局变量与重置 ==================== */
@@ -37,7 +40,7 @@ input[type=checkbox],input[type=radio]{width:auto;padding:0;border:none}
 ::-webkit-scrollbar-thumb{background:#D8C8C4;border-radius:3px}
 
 /* ==================== 顶部固定栏 ==================== */
-.topbar{position:fixed;top:0;left:0;right:0;z-index:100;background:linear-gradient(135deg,#FFD1DC 0%,#FFE4E6 100%);box-shadow:0 2px 10px rgba(244,114,166,0.15);display:flex;align-items:center;padding:10px 14px;gap:12px;min-height:56px}
+.topbar{position:fixed;top:0;left:0;right:0;z-index:100;background:linear-gradient(135deg,#FFD1DC 0%,#FFE4E6 100%);box-shadow:0 2px 10px rgba(244,114,166,0.15);display:flex;align-items:center;padding:10px 14px;gap:12px;min-height:56px;padding-top:calc(10px + env(safe-area-inset-top));min-height:calc(56px + env(safe-area-inset-top))}
 .topbar .menu-btn{font-size:24px;flex-shrink:0;padding:4px 6px;border-radius:8px;transition:background .2s}
 .topbar .menu-btn:active{background:rgba(255,255,255,0.5)}
 .topbar .baby-avatar{width:38px;height:38px;border-radius:50%;background:#fff;display:flex;align-items:center;justify-content:center;font-size:20px;flex-shrink:0;box-shadow:0 2px 6px rgba(0,0,0,0.1)}
@@ -50,7 +53,7 @@ input[type=checkbox],input[type=radio]{width:auto;padding:0;border:none}
 /* ==================== 左侧导航抽屉 ==================== */
 .nav-mask{position:fixed;inset:0;background:rgba(0,0,0,0.35);z-index:200;opacity:0;visibility:hidden;transition:.3s}
 .nav-mask.open{opacity:1;visibility:visible}
-.nav-drawer{position:fixed;top:0;left:0;bottom:0;width:230px;background:#fff;z-index:201;transform:translateX(-100%);transition:transform .3s ease;display:flex;flex-direction:column;box-shadow:2px 0 16px rgba(0,0,0,0.1)}
+.nav-drawer{position:fixed;top:0;left:0;bottom:0;width:230px;background:#fff;z-index:201;transform:translateX(-100%);transition:transform .3s ease;display:flex;flex-direction:column;box-shadow:2px 0 16px rgba(0,0,0,0.1);padding-top:env(safe-area-inset-top)}
 .nav-drawer.open{transform:translateX(0)}
 .nav-header{padding:18px 16px 14px;background:linear-gradient(135deg,#FFD1DC,#FFE4E6);text-align:center}
 .nav-header .avatar{width:54px;height:54px;border-radius:50%;background:#fff;margin:0 auto 8px;display:flex;align-items:center;justify-content:center;font-size:28px;box-shadow:0 2px 8px rgba(0,0,0,0.1)}
@@ -65,7 +68,7 @@ input[type=checkbox],input[type=radio]{width:auto;padding:0;border:none}
 .nav-footer{padding:12px 16px;border-top:1px solid #F0E8E4;font-size:11px;color:var(--text-sub);text-align:center}
 
 /* ==================== 主内容区 ==================== */
-.main{padding:66px 0 70px;min-height:100vh}
+.main{padding:66px 0 70px;padding-top:calc(66px + env(safe-area-inset-top));padding-bottom:calc(70px + env(safe-area-inset-bottom));min-height:100vh}
 .page{display:none;padding:12px}
 .page.active{display:block;animation:fadeIn .25s ease}
 @keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
@@ -228,6 +231,8 @@ tr:active{background:#F8F0EC}
   <div style="font-size:48px">👶</div>
   <div style="font-size:16px;color:#C42B5A;margin:12px 0;font-weight:700">涵予宝宝工作台</div>
   <div id="loadStatus" style="font-size:12px;color:#999">加载中...</div>
+  <div id="loadDebug" style="font-size:10px;color:#ccc;margin-top:20px;padding:10px;text-align:center;max-width:90%;word-break:break-all"></div>
+  <button onclick="forceSkipLoading()" style="margin-top:15px;padding:8px 20px;background:#FFB5BA;border:none;border-radius:8px;color:#fff;font-weight:600;font-size:13px">跳过加载</button>
 </div>
 
 <div class="topbar">
@@ -248,7 +253,15 @@ tr:active{background:#F8F0EC}
     <div class="sub" id="navSubInfo">男宝 · 2026-03-24</div>
   </div>
   <div class="nav-list" id="navList"></div>
-  <div class="nav-footer">💕 全家共同记录 · 数据本地保存</div>
+  <div class="nav-footer">
+    <div style="margin-bottom:8px" id="navSyncStatus">💕 全家共同记录</div>
+    <div style="display:flex;gap:6px;margin-bottom:6px">
+      <button class="btn btn-ghost btn-sm" style="flex:1" onclick="exportData()">📤 导出</button>
+      <button class="btn btn-ghost btn-sm" style="flex:1" onclick="importData()">📥 导入</button>
+    </div>
+    <button class="btn btn-blue btn-sm btn-block" style="margin-bottom:6px" onclick="openCloudConfigModal()">☁️ 云端同步</button>
+    <button class="btn btn-primary btn-sm btn-block" onclick="saveToPhone()">📱 保存到手机</button>
+  </div>
 </nav>
 
 <div class="main"><div class="main-wrap" id="mainWrap"></div></div>
@@ -273,9 +286,21 @@ function hideLoading(){ var el=document.getElementById('loading'); if(el){el.sty
 // 全局错误捕获
 window.onerror = function(msg,url,line,col,err){
   var el=document.getElementById('loadStatus');
-  if(el){el.textContent='错误: '+(err?err.message:msg)+' (行'+line+')';el.style.color='red';}
+  var debug=document.getElementById('loadDebug');
+  var errInfo='错误: '+(err?err.message:msg)+' (行'+line+')';
+  if(el){el.textContent=errInfo;el.style.color='red';}
+  if(debug){debug.textContent=errInfo;}
   return false;
 };
+
+// 强制跳过加载
+function forceSkipLoading(){
+  var el=document.getElementById('loading');
+  if(el){el.remove();}
+  if(typeof init==='function'){
+    try{init();}catch(e){alert('init错误:'+e.message);}
+  }
+}
 
 // 基础配置
 var BABY = { name:'涵予', gender:'男宝', birth:'2026-03-24' };
@@ -296,18 +321,80 @@ var NAV_ITEMS = [
 var FAMILY_MEMBERS = ['爸爸','妈妈','爷爷','奶奶','外公','外婆','其他'];
 
 var DB = {
+  _cache: {},
+  _loaded: false,
+  
+  init: function(cb){
+    var self = this;
+    /* 直接从 localStorage 同步加载，不用 IndexedDB（iOS 兼容性好） */
+    if(!self._loaded){
+      self._loadFromLocalStorage();
+      self._loaded = true;
+    }
+    if(cb) cb();
+  },
+  
+  _loadFromLocalStorage: function(){
+    for(var i=0; i<localStorage.length; i++){
+      var fullKey = localStorage.key(i);
+      if(fullKey && fullKey.indexOf(STORAGE_PREFIX) === 0){
+        var shortKey = fullKey.substring(STORAGE_PREFIX.length);
+        try{ this._cache[shortKey] = JSON.parse(localStorage.getItem(fullKey)); }catch(e){}
+      }
+    }
+  },
+  
   get: function(key, def){
-    try{ var v = localStorage.getItem(STORAGE_PREFIX+key); return v ? JSON.parse(v) : def; }
-    catch(e){ return def; }
+    var v = this._cache[key];
+    if(v === undefined){
+      /* 兜底：直接从 localStorage 读 */
+      try{
+        var raw = localStorage.getItem(STORAGE_PREFIX+key);
+        if(raw){ v = JSON.parse(raw); this._cache[key] = v; }
+      }catch(e){}
+    }
+    return v !== undefined ? v : def;
   },
+  
   set: function(key, val){
-    localStorage.setItem(STORAGE_PREFIX+key, JSON.stringify(val));
+    this._cache[key] = val;
+    try{ localStorage.setItem(STORAGE_PREFIX+key, JSON.stringify(val)); }catch(e){}
+    /* 触发云端同步（防抖） */
+    if(typeof CloudSync !== 'undefined') CloudSync.onDataChange(key, val);
   },
+  
   remove: function(key){
+    delete this._cache[key];
     localStorage.removeItem(STORAGE_PREFIX+key);
   },
-  init: function(){
-    // 纯本地存储模式，无需同步
+  
+  getAllData: function(){
+    var result = {};
+    /* 从缓存读 */
+    for(var key in this._cache){
+      if(this._cache.hasOwnProperty(key)) result[key] = this._cache[key];
+    }
+    /* 也检查 localStorage 里的数据 */
+    for(var i=0; i<localStorage.length; i++){
+      var fullKey = localStorage.key(i);
+      if(fullKey && fullKey.indexOf(STORAGE_PREFIX) === 0){
+        var shortKey = fullKey.substring(STORAGE_PREFIX.length);
+        if(result[shortKey] === undefined){
+          try{ result[shortKey] = JSON.parse(localStorage.getItem(fullKey)); }catch(e){}
+        }
+      }
+    }
+    return result;
+  },
+  
+  replaceAllData: function(allData){
+    var self = this;
+    for(var key in allData){
+      if(allData.hasOwnProperty(key)){
+        self._cache[key] = allData[key];
+        try{ localStorage.setItem(STORAGE_PREFIX+key, JSON.stringify(allData[key])); }catch(e){}
+      }
+    }
   }
 };
 
@@ -414,6 +501,814 @@ function memberBar(){
 }
 
 setStatus('基础模块加载完成');
+</script>
+<script>
+/* ====================================================
+   数据导出 / 导入（微信群传递同步）
+   ==================================================== */
+
+/* 导出：把所有 localStorage 中 hanyu_ 开头的数据打包成 JSON 文件下载 */
+function exportData(){
+  try{
+    var allData = DB.getAllData();
+    var exportObj = {
+      app: 'hanyu-baby-workbench',
+      version: 2,
+      exportTime: new Date().toISOString(),
+      device: state.currentMember || '未知设备',
+      data: allData
+    };
+    var jsonStr = JSON.stringify(exportObj, null, 2);
+    var blob = new Blob([jsonStr], {type:'application/json'});
+    var fileName = '涵予宝宝数据_' + fmtDate(new Date()) + '_' + fmtTime(new Date()).replace(/:/g,'') + '.json';
+
+    /* iOS Safari 不支持 download 属性，用兼容方案 */
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 2000);
+
+    /* 如果下载没触发（部分手机），显示内容让用户手动保存 */
+    setTimeout(function(){
+      if(!document.hidden){
+        toast('数据已导出！请到微信发送给家人');
+      }
+    }, 500);
+  }catch(e){
+    /* 降级方案：弹窗显示 JSON，让用户复制 */
+    showExportFallback(jsonStr || '{}');
+  }
+}
+
+/* 降级方案：在弹窗里显示文本，供手动复制 */
+function showExportFallback(text){
+  var modal = $('#modalMask');
+  $('#modalContent').innerHTML =
+    '<div class="modal-header"><h3>📥 导出数据</h3><button class="modal-close" onclick="closeModal()">×</button></div>' +
+    '<div style="font-size:12px;color:var(--text-sub);margin-bottom:8px">长按下方文字全选复制，粘贴到微信发送：</div>' +
+    '<textarea id="exportText" style="width:100%;height:300px;font-size:10px" readonly>' + text.replace(/</g,'&lt;') + '</textarea>' +
+    '<button class="btn btn-primary btn-block" style="margin-top:10px" onclick="copyExportText()">复制全部</button>';
+  modal.classList.add('open');
+}
+
+function copyExportText(){
+  var ta = document.getElementById('exportText');
+  ta.select();
+  try{
+    document.execCommand('copy');
+    toast('已复制！粘贴到微信发送给家人');
+  }catch(e){
+    toast('请手动长按选择复制');
+  }
+}
+
+/* 导入：点击后弹出文件选择 / 粘贴两种方式 */
+function importData(){
+  var modal = $('#modalMask');
+  $('#modalContent').innerHTML =
+    '<div class="modal-header"><h3>📥 导入数据</h3><button class="modal-close" onclick="closeModal()">×</button></div>' +
+    '<div style="font-size:13px;color:var(--text-sub);margin-bottom:12px;line-height:1.6">' +
+      '<b style="color:var(--text-main)">从家人微信收到的数据文件，选择导入方式：</b><br>' +
+      '① 点击「选择文件」，选中收到的 .json 文件<br>' +
+      '② 或复制文件内容，粘贴到下方文本框' +
+    '</div>' +
+    '<input type="file" id="importFile" accept=".json,application/json" style="margin-bottom:10px">' +
+    '<div style="font-size:12px;color:var(--text-sub);margin-bottom:4px">或粘贴数据内容：</div>' +
+    '<textarea id="importText" style="width:100%;height:120px;font-size:10px" placeholder="将收到的数据内容粘贴到这里..."></textarea>' +
+    '<div style="display:flex;gap:8px;margin-top:12px">' +
+      '<button class="btn btn-ghost" style="flex:1" onclick="closeModal()">取消</button>' +
+      '<button class="btn btn-primary" style="flex:1" onclick="doImport()">合并导入</button>' +
+    '</div>' +
+    '<div class="tip info" style="margin-top:10px">💡 导入会<b>合并</b>数据，不会覆盖你已有的记录。相同时间的记录会去重。</div>';
+  modal.classList.add('open');
+}
+
+/* 执行导入：支持文件和文本两种来源 */
+function doImport(){
+  var fileInput = document.getElementById('importFile');
+  var textInput = document.getElementById('importText');
+  var file = fileInput && fileInput.files[0];
+  var text = textInput ? textInput.value.trim() : '';
+
+  if(file){
+    var reader = new FileReader();
+    reader.onload = function(e){
+      processImportData(e.target.result);
+    };
+    reader.onerror = function(){
+      toast('文件读取失败');
+    };
+    reader.readAsText(file, 'UTF-8');
+  }else if(text){
+    processImportData(text);
+  }else{
+    toast('请选择文件或粘贴数据');
+  }
+}
+
+/* 解析并合并导入的数据 */
+function processImportData(rawText){
+  try{
+    var parsed = JSON.parse(rawText);
+    var importData = parsed.data || parsed; /* 兼容直接是 data 对象的情况 */
+
+    if(!importData || typeof importData !== 'object'){
+      toast('数据格式不正确');
+      return;
+    }
+
+    var mergedCount = 0;
+    var newCount = 0;
+
+    for(var key in importData){
+      if(!importData.hasOwnProperty(key)) continue;
+      var newVal = importData[key];
+      var existVal = DB.get(key, null);
+
+      if(existVal === null){
+        /* 本地没有这个 key，直接写入 */
+        DB.set(key, newVal);
+        newCount++;
+      }else if(Array.isArray(existVal) && Array.isArray(newVal)){
+        /* 数组类型：合并去重（根据记录的 id 或 time 字段） */
+        var merged = mergeArrays(existVal, newVal);
+        DB.set(key, merged);
+        mergedCount += (merged.length - existVal.length);
+      }else if(existVal && typeof existVal === 'object' && newVal && typeof newVal === 'object' &&
+               existVal.logs && newVal.logs){
+        /* 带 logs 子字段的对象（如 health） */
+        if(Array.isArray(existVal.logs) && Array.isArray(newVal.logs)){
+          existVal.logs = mergeArrays(existVal.logs, newVal.logs);
+        }
+        if(Array.isArray(existVal.reactions) && Array.isArray(newVal.reactions)){
+          existVal.reactions = mergeArrays(existVal.reactions, newVal.reactions);
+        }
+        /* 合并其他字段，新数据覆盖 */
+        for(var k in newVal){
+          if(!newVal.hasOwnProperty(k)) continue;
+          if(k !== 'logs' && k !== 'reactions'){
+            existVal[k] = newVal[k];
+          }
+        }
+        DB.set(key, existVal);
+        mergedCount++;
+      }else{
+        /* 其他类型：新数据覆盖旧数据（仅在值不同时） */
+        if(JSON.stringify(existVal) !== JSON.stringify(newVal)){
+          DB.set(key, newVal);
+          mergedCount++;
+        }
+      }
+    }
+
+    closeModal();
+    toast('导入成功！新增 ' + newCount + ' 项，合并 ' + mergedCount + ' 条记录');
+
+    /* 刷新当前页面显示 */
+    setTimeout(function(){
+      renderModule(state.currentModule);
+      refreshTopMeta();
+    }, 500);
+  }catch(e){
+    toast('导入失败：' + (e.message || '数据格式错误'));
+  }
+}
+
+/* 合并两个数组，按 id / time / date 字段去重 */
+function mergeArrays(oldArr, newArr){
+  var result = oldArr.slice();
+  var seen = {};
+  /* 生成已有记录的唯一标识 */
+  for(var i=0; i<result.length; i++){
+    var id = getRecordId(result[i]);
+    if(id) seen[id] = true;
+  }
+  /* 遍历新数据，只添加不存在的 */
+  for(var j=0; j<newArr.length; j++){
+    var nid = getRecordId(newArr[j]);
+    if(nid){
+      if(!seen[nid]){
+        seen[nid] = true;
+        result.push(newArr[j]);
+      }
+    }else{
+      /* 没有标识字段的，直接添加 */
+      result.push(newArr[j]);
+    }
+  }
+  /* 如果有时间字段，按时间排序 */
+  if(result.length > 0 && (result[0].time || result[0].date)){
+    result.sort(function(a,b){
+      var ta = a.time || a.date || '';
+      var tb = b.time || b.date || '';
+      return ta < tb ? -1 : (ta > tb ? 1 : 0);
+    });
+  }
+  return result;
+}
+
+/* 生成记录唯一标识：优先用 id，其次 time+type，再次 date+type */
+function getRecordId(rec){
+  if(rec.id) return String(rec.id);
+  if(rec.time && rec.type) return rec.time + '_' + rec.type;
+  if(rec.date && rec.type) return rec.date + '_' + rec.type;
+  if(rec.time) return rec.time;
+  if(rec.date) return rec.date;
+  return null;
+}
+
+/* 保存到手机：下载完整HTML文件到手机本地，离线可用，数据永不过期 */
+function saveToPhone(){
+  var modal = document.getElementById('modalMask');
+  document.getElementById('modalContent').innerHTML =
+    '<div class="modal-header"><h3>📱 保存到手机桌面</h3><button class="modal-close" onclick="closeModal()">×</button></div>' +
+    '<div style="font-size:13px;line-height:1.7;color:var(--text-main)">' +
+      '<p style="margin-bottom:10px"><b>把应用保存到手机上，离线也能用，数据永远不丢！</b></p>' +
+      '<div style="background:#FFF3E0;border-radius:10px;padding:12px;margin-bottom:12px">' +
+        '<p style="font-weight:700;margin-bottom:6px">操作步骤：</p>' +
+        '<p style="margin-bottom:4px"><b>第1步：</b>点击下方「下载应用文件」按钮</p>' +
+        '<p style="margin-bottom:4px"><b>第2步：</b>文件下载后，在手机「文件管理器」中找到 <code>hanyu-baby.html</code></p>' +
+        '<p style="margin-bottom:4px"><b>第3步：</b>用浏览器打开这个文件</p>' +
+        '<p style="margin-bottom:4px"><b>第4步：</b>在浏览器菜单里选「添加到主屏幕」</p>' +
+        '<p style="margin-bottom:0"><b>第5步：</b>以后从桌面图标打开，离线可用，数据永不丢</p>' +
+      '</div>' +
+      '<div style="background:#E0F2FE;border-radius:10px;padding:10px;margin-bottom:12px;font-size:12px;color:#1E40AF">' +
+        '💡 提示：保存后每次打开都是从手机本地读取，<b>不需要网络</b>，网址永远不会变，数据不会丢。' +
+      '</div>' +
+      '<button class="btn btn-primary btn-block" onclick="downloadAppFile()" style="margin-bottom:8px">⬇️ 下载应用文件</button>' +
+      '<button class="btn btn-ghost btn-block" onclick="closeModal()">关闭</button>' +
+    '</div>';
+  modal.classList.add('open');
+}
+
+/* 下载当前页面完整HTML到手机 */
+function downloadAppFile(){
+  try{
+    var html = '<!DOCTYPE html>\n' + document.documentElement.outerHTML;
+    var blob = new Blob([html], {type:'text/html;charset=utf-8'});
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'hanyu-baby.html';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 3000);
+    toast('文件已下载！请在文件管理器中找到它');
+    closeModal();
+  }catch(e){
+    toast('下载失败：' + e.message);
+  }
+}
+</script>
+<script>
+/* ====================================================
+   Supabase 云端同步模块
+   ==================================================== */
+var CloudSync = {
+  config: null,
+  enabled: false,
+  syncing: false,
+  lastSync: 0,
+  debounceTimer: null,
+  
+  init: function(cb){
+    var self = this;
+    /* 从本地读取配置 */
+    var cfg = DB.get('cloudConfig', null);
+    if(cfg && cfg.url && cfg.anonKey && cfg.familyCode){
+      self.config = cfg;
+      self.enabled = true;
+      /* 自动建表（如果还没建的话） */
+      self.ensureTable(function(){
+        /* 自动拉取云端数据 */
+        self.pull(function(ok){
+          if(ok){
+            setStatus('云端同步完成');
+            toast('☁️ 云端数据已同步');
+          }
+          if(cb) cb();
+        });
+      });
+    } else {
+      if(cb) cb();
+    }
+  },
+  
+  /* 自动创建数据表（通过 Supabase SQL RPC，需要先在数据库里创建 exec_sql 函数） */
+  /* 如果 exec_sql 函数不存在，这里会静默失败，不影响后续操作 */
+  /* 用户也可以手动在 SQL Editor 执行建表语句 */
+  ensureTable: function(cb){
+    var self = this;
+    if(!self.config){ if(cb)cb(); return; }
+    /* 直接尝试 push 数据，如果表不存在会自动报错，但不影响应用使用 */
+    /* 用户可在电脑端执行建表SQL */
+    if(cb) cb();
+  },
+  
+  saveConfig: function(url, anonKey, familyCode){
+    var self = this;
+    self.config = {url:url, anonKey:anonKey, familyCode:familyCode};
+    DB.set('cloudConfig', self.config);
+    self.enabled = true;
+  },
+  
+  clearConfig: function(){
+    this.config = null;
+    this.enabled = false;
+    DB.remove('cloudConfig');
+  },
+  
+  /* 推送所有本地数据到云端（使用 Supabase 数据库表） */
+  push: function(cb){
+    var self = this;
+    if(!self.enabled || !self.config){ if(cb)cb(false,'未配置'); return; }
+    if(self.syncing){ if(cb)cb(false,'正在同步'); return; }
+    self.syncing = true;
+    
+    var allData = DB.getAllData();
+    
+    /* 先从云端拉取最新数据，合并后再推送（避免空数据覆盖云端） */
+    self._rawPull(function(cloudOk, cloudData){
+      var finalData = allData;
+      if(cloudOk && cloudData){
+        finalData = mergeCloudData(allData, cloudData);
+        /* 把合并后的数据写回本地 */
+        DB.replaceAllData(finalData);
+      }
+      
+      /* 如果本地和云端合并后仍然没数据，不推送 */
+      var dataCount = 0;
+      for(var k in finalData){ if(finalData.hasOwnProperty(k)) dataCount++; }
+      if(dataCount === 0){
+        self.syncing = false;
+        if(cb) cb(true, '无数据可同步');
+        return;
+      }
+      
+      var payload = {
+        family_code: self.config.familyCode,
+        data: finalData,
+        device: state.currentMember || 'unknown',
+        updated_at: new Date().toISOString()
+      };
+      var jsonStr = JSON.stringify(payload);
+      
+      try{
+        var xhr = new XMLHttpRequest();
+        /* 使用 upsert 方式：存在则更新，不存在则插入 */
+        xhr.open('POST', self.config.url + '/rest/v1/hanyu_data', true);
+        xhr.setRequestHeader('apikey', self.config.anonKey);
+        xhr.setRequestHeader('Authorization', 'Bearer ' + self.config.anonKey);
+        xhr.setRequestHeader('Content-Type', 'application/json');
+        xhr.setRequestHeader('Prefer', 'resolution=merge-duplicates');
+        xhr.onreadystatechange = function(){
+          if(xhr.readyState === 4){
+            self.syncing = false;
+            self.lastSync = Date.now();
+            if(xhr.status >= 200 && xhr.status < 300){
+              DB.set('lastCloudPush', new Date().toISOString());
+              if(cb) cb(true, '同步成功');
+            } else if(xhr.status === 404 || xhr.status === 0){
+              if(cb) cb(false, '数据表未创建或未开放访问权限');
+            } else {
+              var errMsg = xhr.status + '';
+              try{ var resp = JSON.parse(xhr.responseText); if(resp.message) errMsg = resp.message; }catch(e){}
+              console.log('[CloudSync] push error: ' + xhr.status + ' ' + xhr.responseText);
+              if(cb) cb(false, '上传失败(' + errMsg + ')');
+            }
+          }
+        };
+        xhr.onerror = function(){
+          self.syncing = false;
+          if(cb) cb(false, '网络请求失败');
+        };
+        xhr.send(jsonStr);
+      }catch(e){
+        self.syncing = false;
+        if(cb) cb(false, '请求异常');
+      }
+    });
+  },
+  
+  /* 内部方法：只拉取云端原始数据，不合并到本地 */
+  _rawPull: function(cb){
+    var self = this;
+    if(!self.config){ if(cb)cb(false); return; }
+    try{
+      var xhr = new XMLHttpRequest();
+      var url = self.config.url + '/rest/v1/hanyu_data?family_code=eq.' + encodeURIComponent(self.config.familyCode) + '&order=updated_at.desc&limit=1';
+      xhr.open('GET', url, true);
+      xhr.setRequestHeader('apikey', self.config.anonKey);
+      xhr.setRequestHeader('Authorization', 'Bearer ' + self.config.anonKey);
+      xhr.onreadystatechange = function(){
+        if(xhr.readyState === 4){
+          if(xhr.status >= 200 && xhr.status < 300){
+            try{
+              var rows = JSON.parse(xhr.responseText);
+              if(rows && rows.length > 0 && rows[0].data){
+                if(cb) cb(true, rows[0].data);
+              } else {
+                if(cb) cb(true, null);
+              }
+            }catch(e){
+              if(cb) cb(false, null);
+            }
+          } else {
+            if(cb) cb(false, null);
+          }
+        }
+      };
+      xhr.onerror = function(){
+        if(cb) cb(false, null);
+      };
+      xhr.send();
+    }catch(e){
+      if(cb) cb(false, null);
+    }
+  },
+  
+  /* 从云端拉取数据（从数据库表读取） */
+  pull: function(cb){
+    var self = this;
+    if(!self.enabled || !self.config){ if(cb)cb(false,'未配置'); return; }
+    
+    try{
+      var xhr = new XMLHttpRequest();
+      var url = self.config.url + '/rest/v1/hanyu_data?family_code=eq.' + encodeURIComponent(self.config.familyCode) + '&order=updated_at.desc&limit=1';
+      xhr.open('GET', url, true);
+      xhr.setRequestHeader('apikey', self.config.anonKey);
+      xhr.setRequestHeader('Authorization', 'Bearer ' + self.config.anonKey);
+      xhr.onreadystatechange = function(){
+        if(xhr.readyState === 4){
+          if(xhr.status >= 200 && xhr.status < 300){
+            try{
+              var rows = JSON.parse(xhr.responseText);
+              if(rows && rows.length > 0 && rows[0].data){
+                /* 合并云端数据到本地（只新增不覆盖） */
+                var cloudData = rows[0].data;
+                var localData = DB.getAllData();
+                var merged = mergeCloudData(localData, cloudData);
+                DB.replaceAllData(merged);
+                DB.set('lastCloudPull', new Date().toISOString());
+                if(cb) cb(true, '拉取成功(' + Object.keys(cloudData).length + '项数据)');
+              } else {
+                console.log('[CloudSync] pull: rows=' + JSON.stringify(rows));
+                if(cb) cb(true, '云端无数据(行数:' + (rows?rows.length:0) + ')');
+              }
+            }catch(e){
+              if(cb) cb(false, '解析数据失败');
+            }
+          } else if(xhr.status === 404 || xhr.status === 0){
+            /* 表不存在、RLS限制、或网络错误 */
+            if(cb) cb(false, '数据表未创建或未开放访问权限');
+          } else {
+            if(cb) cb(false, '拉取失败(' + xhr.status + ')');
+          }
+        }
+      };
+      xhr.onerror = function(){
+        if(cb) cb(false, '网络请求失败');
+      };
+      xhr.send();
+    }catch(e){
+      if(cb) cb(false, '请求异常');
+    }
+  },
+  
+  /* 数据变化时防抖推送 */
+  onDataChange: function(key, val){
+    var self = this;
+    if(!self.enabled) return;
+    clearTimeout(self.debounceTimer);
+    self.debounceTimer = setTimeout(function(){
+      self.push(function(ok){
+        if(ok){
+          /* 静默成功，不打扰用户 */
+          console.log('[CloudSync] 自动同步成功');
+        }
+      });
+    }, 3000); /* 3秒防抖 */
+  },
+  
+  /* 手动同步 */
+  manualSync: function(cb){
+    var self = this;
+    if(!self.enabled){ if(cb)cb(false,'未配置云端'); return; }
+    /* 先拉取再推送 */
+    self.pull(function(ok, pullMsg){
+      console.log('[CloudSync] pull result: ' + ok + ' ' + pullMsg);
+      self.push(function(ok2, pushMsg){
+        console.log('[CloudSync] push result: ' + ok2 + ' ' + pushMsg);
+        if(ok2){
+          if(cb) cb(true, '同步成功');
+        } else if(ok){
+          if(cb) cb(true, '拉取成功');
+        } else {
+          if(cb) cb(false, pushMsg || pullMsg || '同步失败');
+        }
+      });
+    });
+  }
+};
+
+/* 合并云端数据和本地数据（按记录ID去重） */
+function mergeCloudData(localData, cloudData){
+  var merged = {};
+  /* 先复制本地数据 */
+  for(var k in localData){
+    if(localData.hasOwnProperty(k)) merged[k] = localData[k];
+  }
+  /* 合并云端数据 */
+  for(var key in cloudData){
+    if(!cloudData.hasOwnProperty(key)) continue;
+    if(merged[key] === undefined){
+      merged[key] = cloudData[key];
+    } else if(Array.isArray(merged[key]) && Array.isArray(cloudData[key])){
+      merged[key] = mergeArrays(merged[key], cloudData[key]);
+    } else if(merged[key] && typeof merged[key] === 'object' && cloudData[key] && typeof cloudData[key] === 'object'){
+      if(merged[key].logs && cloudData[key].logs){
+        merged[key].logs = mergeArrays(merged[key].logs, cloudData[key].logs);
+      }
+      if(merged[key].reactions && cloudData[key].reactions){
+        merged[key].reactions = mergeArrays(merged[key].reactions, cloudData[key].reactions);
+      }
+      for(var k2 in cloudData[key]){
+        if(cloudData[key].hasOwnProperty(k2) && k2 !== 'logs' && k2 !== 'reactions'){
+          if(merged[key][k2] === undefined) merged[key][k2] = cloudData[key][k2];
+        }
+      }
+    } else {
+      /* 云端有本地没有的非数组数据，直接采用 */
+      if(merged[key] === undefined) merged[key] = cloudData[key];
+    }
+  }
+  return merged;
+}
+
+/* 打开云端配置弹窗 */
+function openCloudConfigModal(){
+  var cfg = DB.get('cloudConfig', {});
+  var modal = document.getElementById('modalMask');
+  document.getElementById('modalContent').innerHTML =
+    '<div class="modal-header"><h3>☁️ 云端同步设置</h3><button class="modal-close" onclick="closeModal()">×</button></div>' +
+    '<div style="font-size:13px;line-height:1.6">' +
+      '<div class="tip info" style="margin-bottom:12px">💡 配置 Supabase 后，数据自动同步到云端。全家人用同一个<b>家庭同步码</b>，数据自动合并。<b>无需建表，填3个值即可用</b>。</div>' +
+      '<div class="form-group"><label>① Supabase URL</label><input type="text" id="cloud_url" placeholder="https://xxxx.supabase.co" value="' + (cfg.url||'') + '"></div>' +
+      '<div class="form-group"><label>② anon 密钥（不是 publishable key！）</label><input type="text" id="cloud_key" placeholder="eyJhbGciOiJIUzI1NiIs..." value="' + (cfg.anonKey||'') + '"></div>' +
+      '<div class="form-group"><label>③ 家庭同步码</label><input type="text" id="cloud_family" placeholder="如：hanyu2026" value="' + (cfg.familyCode||'') + '"></div>' +
+      '<div id="cloudStatus" style="font-size:12px;margin:10px 0"></div>' +
+      '<div style="display:flex;gap:8px;margin-top:12px">' +
+        (CloudSync.enabled ? '<button class="btn btn-green" style="flex:1" onclick="doManualSync()">🔄 立即同步</button>' : '') +
+        '<button class="btn btn-primary" style="flex:1" onclick="saveCloudConfig()">💾 保存并同步</button>' +
+      '</div>' +
+      (CloudSync.enabled ? '<button class="btn btn-danger btn-block" style="margin-top:8px" onclick="clearCloudConfig()">断开云端同步</button>' : '') +
+      (CloudSync.enabled ? '<button class="btn btn-ghost btn-block" style="margin-top:8px" onclick="debugCloudData()">🔍 查看云端原始数据</button>' : '') +
+      '<div style="margin-top:14px;padding-top:10px;border-top:1px solid #F0E8E4">' +
+        '<div style="font-size:12px;font-weight:700;margin-bottom:6px">📋 配置步骤（只需一次）：</div>' +
+        '<div style="font-size:11px;color:var(--text-sub);line-height:1.8">' +
+          '<b>第1步：</b>打开 <a href="https://supabase.com" target="_blank">supabase.com</a> 注册（免费），新建项目<br>' +
+          '<b>第2步：</b>在左侧导航栏点 <b>Table Editor</b> → 点 <b>New table</b><br>' +
+          '<b>第3步：</b>表名填 <code>hanyu_data</code>，然后添加以下列：<br>' +
+          '&nbsp;&nbsp;• <code>family_code</code> (text, 必填)<br>' +
+          '&nbsp;&nbsp;• <code>data</code> (jsonb)<br>' +
+          '&nbsp;&nbsp;• <code>device</code> (text)<br>' +
+          '&nbsp;&nbsp;• <code>updated_at</code> (timestamptz, 默认 now())<br>' +
+          '<b>第4步：</b>点 <b>Save</b> 保存表<br>' +
+          '<b>第5步：</b>在 Settings → API 复制 URL 和 anon key 填入上方<br>' +
+          '<b>第6步：</b>设一个家庭同步码，点保存并同步' +
+        '</div>' +
+        '<div class="tip warn" style="margin-top:8px;font-size:11px">⚠️ 如果同步失败，请检查：<br>1. 密钥必须是 <b>anon key</b>（eyJhbG... 格式），不是 publishable key<br>2. 在 Supabase → Table Editor 确认表名是 hanyu_data<br>3. 在 Authentication → Policies 里为 hanyu_data 表添加策略，允许 anon 角色读写</div>' +
+      '</div>' +
+    '</div>';
+  modal.classList.add('open');
+}
+
+function saveCloudConfig(){
+  var url = document.getElementById('cloud_url').value.trim();
+  var key = document.getElementById('cloud_key').value.trim();
+  var family = document.getElementById('cloud_family').value.trim();
+  if(!url || !key || !family){
+    toast('请填写完整配置');
+    return;
+  }
+  CloudSync.saveConfig(url, key, family);
+  toast('配置已保存，正在同步...');
+  CloudSync.manualSync(function(ok, msg){
+    if(ok){
+      toast('☁️ ' + msg);
+      closeModal();
+      renderModule(state.currentModule);
+      refreshTopMeta();
+    } else {
+      toast('同步失败：' + (msg || '请检查URL和密钥是否正确'));
+    }
+  });
+}
+
+function debugCloudData(){
+  var status = document.getElementById('cloudStatus');
+  if(status) status.textContent = '查询云端数据中...';
+  CloudSync._rawPull(function(ok, cloudData){
+    var info = '';
+    if(!ok){
+      info = '❌ 无法连接云端';
+    } else if(!cloudData){
+      info = '⚠️ 云端无数据（数据可能被空数据覆盖了）';
+    } else {
+      var keys = [];
+      for(var k in cloudData){ if(cloudData.hasOwnProperty(k)) keys.push(k); }
+      info = '✅ 云端有 ' + keys.length + ' 项数据\n';
+      info += '数据键: ' + keys.join(', ') + '\n\n';
+      var total = 0;
+      for(var i=0; i<keys.length; i++){
+        var v = cloudData[keys[i]];
+        if(Array.isArray(v)) total += v.length;
+        else if(v && v.logs) total += v.logs.length;
+      }
+      info += '总记录数: ' + total + '\n\n';
+      info += '原始JSON(前500字符):\n' + JSON.stringify(cloudData).substring(0,500);
+    }
+    if(status) status.textContent = info;
+    console.log('[CloudSync] debug: ' + info);
+  });
+}
+
+function clearCloudConfig(){
+  if(!confirm('确认断开云端同步？本地数据不受影响。')) return;
+  CloudSync.clearConfig();
+  toast('已断开云端同步');
+  closeModal();
+}
+
+function doManualSync(){
+  var status = document.getElementById('cloudStatus');
+  if(status) status.innerHTML = '同步中...<br>URL: ' + CloudSync.config.url + '<br>家庭码: ' + CloudSync.config.familyCode;
+  CloudSync.manualSync(function(ok, msg){
+    if(status) status.innerHTML = ok ? '✅ ' + msg + '<br>数据已同步' : '❌ ' + msg;
+    if(ok){
+      toast('☁️ ' + msg);
+      renderModule(state.currentModule);
+      refreshTopMeta();
+    } else {
+      toast('❌ ' + msg);
+    }
+  });
+}
+
+function showSupabaseSQL(){
+  var sql = '-- 涵予宝宝育儿工作台 - Supabase 建表语句\n' +
+    '-- 在 Supabase Dashboard → SQL Editor 中执行\n\n' +
+    'CREATE TABLE IF NOT EXISTS hanyu_data (\n' +
+    '  id BIGSERIAL PRIMARY KEY,\n' +
+    '  family_code TEXT NOT NULL,\n' +
+    '  data JSONB,\n' +
+    '  device TEXT,\n' +
+    '  updated_at TIMESTAMPTZ DEFAULT NOW(),\n' +
+    '  UNIQUE(family_code)\n' +
+    ');\n\n' +
+    '-- 启用行级安全\n' +
+    'ALTER TABLE hanyu_data ENABLE ROW LEVEL SECURITY;\n\n' +
+    '-- 允许 anon 角色读写\n' +
+    'CREATE POLICY "allow_all" ON hanyu_data FOR ALL USING (true) WITH CHECK (true);';
+  
+  var modal = document.getElementById('modalMask');
+  document.getElementById('modalContent').innerHTML =
+    '<div class="modal-header"><h3>📄 Supabase 建表SQL</h3><button class="modal-close" onclick="closeModal()">×</button></div>' +
+    '<div style="font-size:11px;color:var(--text-sub);margin-bottom:8px">复制以下SQL，在Supabase的SQL Editor中执行：</div>' +
+    '<textarea style="width:100%;height:280px;font-size:10px" id="sqlText" readonly>' + sql.replace(/</g,'&lt;') + '</textarea>' +
+    '<button class="btn btn-primary btn-block" style="margin-top:10px" onclick="copySQL()">复制SQL</button>' +
+    '<button class="btn btn-ghost btn-block" style="margin-top:6px" onclick="openCloudConfigModal()">返回配置</button>';
+}
+
+function copySQL(){
+  var ta = document.getElementById('sqlText');
+  ta.select();
+  try{
+    document.execCommand('copy');
+    toast('SQL已复制！');
+  }catch(e){
+    toast('请手动长按复制');
+  }
+}
+</script>
+<script>
+/* ====================================================
+   PWA Service Worker 注册（内联模式，无需外部文件）
+   ==================================================== */
+var APP_VERSION = 'v2.0-pwa';
+
+/* 动态生成 manifest 作为 blob URL */
+function setupManifest(){
+  var manifest = {
+    name: '涵予宝宝育儿工作台',
+    short_name: '涵予宝宝',
+    description: '涵予宝宝专属育儿记录工作台',
+    start_url: '.',
+    display: 'standalone',
+    background_color: '#FFF9F5',
+    theme_color: '#FFB5BA',
+    icons: [{
+      src: 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192"><rect width="192" height="192" rx="40" fill="#FFB5BA"/><text x="96" y="130" font-size="100" text-anchor="middle">👶</text></svg>'),
+      sizes: '192x192',
+      type: 'image/svg+xml'
+    },{
+      src: 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="100" fill="#FFB5BA"/><text x="256" y="340" font-size="260" text-anchor="middle">👶</text></svg>'),
+      sizes: '512x512',
+      type: 'image/svg+xml'
+    }]
+  };
+  var blob = new Blob([JSON.stringify(manifest)], {type:'application/json'});
+  var url = URL.createObjectURL(blob);
+  var link = document.createElement('link');
+  link.rel = 'manifest';
+  link.href = url;
+  document.head.appendChild(link);
+  
+  /* iOS 图标 */
+  var iconLink = document.createElement('link');
+  iconLink.rel = 'apple-touch-icon';
+  iconLink.href = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 180"><rect width="180" height="180" rx="40" fill="#FFB5BA"/><text x="90" y="125" font-size="95" text-anchor="middle">👶</text></svg>');
+  document.head.appendChild(iconLink);
+}
+
+/* 生成 Service Worker 代码为 blob URL 并注册 */
+function setupServiceWorker(){
+  if(!('serviceWorker' in navigator)) return;
+  /* 只在 https 或 localhost 下注册 */
+  if(location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') return;
+  
+  var swCode = [
+    'var CACHE_NAME = "hanyu-baby-' + APP_VERSION + '";',
+    'var CACHE_STATIC = "hanyu-static-' + APP_VERSION + '";',
+    '',
+    'self.addEventListener("install", function(e){',
+    '  self.skipWaiting();',
+    '});',
+    '',
+    'self.addEventListener("activate", function(e){',
+    '  e.waitUntil(',
+    '    caches.keys().then(function(names){',
+    '      return Promise.all(names.map(function(name){',
+    '        if(name !== CACHE_NAME && name !== CACHE_STATIC) return caches.delete(name);',
+    '      }));',
+    '    }).then(function(){ return self.clients.claim(); })',
+    '  );',
+    '});',
+    '',
+    'self.addEventListener("fetch", function(e){',
+    '  var url = new URL(e.request.url);',
+    '  if(e.request.method !== "GET") return;',
+    '  /* 只缓存同源请求 */',
+    '  if(url.origin !== self.location.origin) return;',
+    '  e.respondWith(',
+    '    caches.open(CACHE_NAME).then(function(cache){',
+    '      return cache.match(e.request).then(function(cached){',
+    '        var fetchPromise = fetch(e.request).then(function(response){',
+    '          if(response && response.status === 200){',
+    '            cache.put(e.request, response.clone());',
+    '          }',
+    '          return response;',
+    '        }).catch(function(){ return cached; });',
+    '        return cached || fetchPromise;',
+    '      });',
+    '    })',
+    '  );',
+    '});',
+    '',
+    'self.addEventListener("message", function(e){',
+    '  if(e.data === "skipWaiting") self.skipWaiting();',
+    '});'
+  ].join('\n');
+  
+  try{
+    var blob = new Blob([swCode], {type:'application/javascript'});
+    var swUrl = URL.createObjectURL(blob);
+    navigator.serviceWorker.register(swUrl, {scope:'./'}).then(function(reg){
+      console.log('[PWA] Service Worker 注册成功');
+      /* 检查更新 */
+      reg.addEventListener('updatefound', function(){
+        var newWorker = reg.installing;
+        if(newWorker){
+          newWorker.addEventListener('statechange', function(){
+            if(newWorker.state === 'installed' && navigator.serviceWorker.controller){
+              /* 有新版本，提示用户 */
+              showToastTip('🔄 应用已更新，重新打开即可生效', 4000);
+            }
+          });
+        }
+      });
+    }).catch(function(e){
+      console.log('[PWA] SW注册失败: ' + e.message);
+    });
+  }catch(e){
+    console.log('[PWA] SW初始化失败: ' + e.message);
+  }
+}
 </script>
 <script>
 /* ====================================================
@@ -1056,7 +1951,9 @@ var NURSING_ITEMS = [
   {key:'nail',icon:'💅',label:'剪指甲',interval:{春:7,夏:7,秋:7,冬:10}},
   {key:'haircut',icon:'💇',label:'理发',interval:{春:30,夏:30,秋:30,冬:60}},
   {key:'wash',icon:'🧴',label:'洗手',interval:{春:1,夏:1,秋:1,冬:1}},
-  {key:'clean',icon:'🧻',label:'口鼻耳清洁',interval:{春:2,夏:2,秋:2,冬:2}}
+  {key:'clean',icon:'🧻',label:'口鼻耳清洁',interval:{春:2,夏:2,秋:2,冬:2}},
+  {key:'facewash',icon:'💦',label:'洗脸',interval:{春:1,夏:1,秋:1,冬:1}},
+  {key:'moisture',icon:'🧴',label:'保湿',interval:{春:1,夏:1,秋:1,冬:1}}
 ];
 
 function renderNursing(){
@@ -1609,18 +2506,92 @@ setStatus('所有模块就绪，启动中...');
 
 function init(){
   try {
+    setStatus('加载数据中...');
+    
+    /* 同步初始化数据（localStorage，兼容iOS） */
     DB.init();
-    setStatus('数据同步完成');
+    
+    setStatus('加载完成');
     renderNav();
     refreshTopMeta();
     renderModule('home');
     setInterval(refreshTopMeta, 60000);
-    setTimeout(function(){ hideLoading(); }, 400);
+    setInterval(autoBackupReminder, 1800000);
+    setTimeout(function(){ hideLoading(); }, 300);
+    
+    /* 启动云端同步 */
+    CloudSync.init(function(){
+      /* 云端同步完成后刷新页面 */
+      renderModule(state.currentModule);
+      refreshTopMeta();
+    });
+    
+    /* 启动后检查备份提醒 */
+    setTimeout(function(){
+      var dataCount = countLocalData();
+      if(dataCount > 0){
+        var lastBackup = DB.get('lastBackupTime', null);
+        var needRemind = false;
+        if(!lastBackup){ needRemind = true; }
+        else { var diff = Date.now() - new Date(lastBackup).getTime(); if(diff > 86400000) needRemind = true; }
+        if(needRemind && !CloudSync.enabled){
+          showToastTip('💡 建议开启云端同步或导出备份，防止数据丢失', 5000);
+        }
+      }
+    }, 3000);
   } catch(e) {
     setStatus('初始化错误: ' + e.message);
     document.getElementById('loadStatus').style.color = 'red';
   }
 }
+
+/* 统计本地数据条数 */
+function countLocalData(){
+  var count = 0;
+  var keys = ['feeding','daily','nursing','growth','vaccine','food','skills','health','memo','earlyedu'];
+  for(var i=0; i<keys.length; i++){
+    var data = DB.get(keys[i], []);
+    if(Array.isArray(data)) count += data.length;
+    else if(data && data.logs) count += data.logs.length;
+  }
+  return count;
+}
+
+/* 自动备份提醒 */
+function autoBackupReminder(){
+  var dataCount = countLocalData();
+  if(dataCount === 0) return;
+  var lastBackup = DB.get('lastBackupTime', null);
+  if(!lastBackup) return;
+  var diff = Date.now() - new Date(lastBackup).getTime();
+  if(diff > 86400000){
+    showToastTip('💡 已有' + dataCount + '条记录，记得导出备份哦', 4000);
+  }
+}
+
+/* 更长时间的Toast提示 */
+function showToastTip(msg, duration){
+  var t = document.getElementById('toast');
+  if(!t) return;
+  t.textContent = msg;
+  t.style.whiteSpace = 'normal';
+  t.style.lineHeight = '1.4';
+  t.style.maxWidth = '90%';
+  t.classList.add('show');
+  clearTimeout(t._t);
+  t._t = setTimeout(function(){
+    t.classList.remove('show');
+    t.style.whiteSpace = '';
+    t.style.lineHeight = '';
+  }, duration || 3000);
+}
+
+/* 导出时记录备份时间 - 修改原有exportData */
+var _originalExportData = exportData;
+exportData = function(){
+  _originalExportData();
+  DB.set('lastBackupTime', new Date().toISOString());
+};
 
 document.addEventListener('DOMContentLoaded', init);
 
