@@ -129,6 +129,9 @@ textarea{resize:vertical;min-height:60px}
 .btn-blue{background:var(--c-blue-deep);color:#fff}
 .btn-green{background:var(--c-green-deep);color:#fff}
 .btn-orange{background:var(--c-orange-deep);color:#fff}
+.btn-purple{background:var(--c-purple-deep);color:#fff}
+.btn-teal{background:var(--c-teal-deep,#0D9488);color:#fff}
+.btn-rose{background:var(--c-rose-deep);color:#fff}
 .btn-ghost{background:#F5EDE9;color:var(--text-main)}
 .btn-danger{background:#FECACA;color:#DC2626}
 .btn-sm{padding:5px 10px;font-size:12px}
@@ -323,15 +326,95 @@ var FAMILY_MEMBERS = ['爸爸','妈妈','爷爷','奶奶','外公','外婆','其
 var DB = {
   _cache: {},
   _loaded: false,
+  _idb: null,
+  _idbReady: false,
+  _saveQueue: [],
   
   init: function(cb){
     var self = this;
-    /* 直接从 localStorage 同步加载，不用 IndexedDB（iOS 兼容性好） */
     if(!self._loaded){
       self._loadFromLocalStorage();
       self._loaded = true;
     }
+    /* 异步初始化IndexedDB备份，不阻塞主流程 */
+    self._initIDB();
     if(cb) cb();
+  },
+  
+  _initIDB: function(){
+    var self = this;
+    try{
+      if(!window.indexedDB) return;
+      var req = indexedDB.open('hanyu_baby_db', 1);
+      var timeout = setTimeout(function(){
+        console.log('[DB] IndexedDB初始化超时, 仅用localStorage');
+      }, 3000);
+      req.onsuccess = function(e){
+        clearTimeout(timeout);
+        self._idb = e.target.result;
+        self._idbReady = true;
+        self._flushSaveQueue();
+        console.log('[DB] IndexedDB备份就绪');
+      };
+      req.onerror = function(){
+        clearTimeout(timeout);
+        console.log('[DB] IndexedDB打开失败, 仅用localStorage');
+      };
+      req.onupgradeneeded = function(e){
+        var db = e.target.result;
+        if(!db.objectStoreNames.contains('kv')){
+          db.createObjectStore('kv');
+        }
+      };
+    }catch(e){
+      console.log('[DB] IndexedDB初始化异常: ' + e.message);
+    }
+  },
+  
+  _idbSet: function(key, val){
+    var self = this;
+    if(!self._idbReady || !self._idb){
+      self._saveQueue.push({key:key, val:val});
+      return;
+    }
+    try{
+      var tx = self._idb.transaction(['kv'], 'readwrite');
+      tx.objectStore('kv').put(JSON.stringify(val), key);
+    }catch(e){}
+  },
+  
+  _flushSaveQueue: function(){
+    var self = this;
+    while(self._saveQueue.length){
+      var item = self._saveQueue.shift();
+      self._idbSet(item.key, item.val);
+    }
+  },
+  
+  restoreFromIDB: function(cb){
+    var self = this;
+    if(!self._idbReady || !self._idb){ if(cb) cb(false); return; }
+    try{
+      var tx = self._idb.transaction(['kv'], 'readonly');
+      var store = tx.objectStore('kv');
+      var req = store.getAllKeys();
+      req.onsuccess = function(){
+        var keys = req.result;
+        var pending = keys.length;
+        if(pending === 0){ if(cb) cb(true, {}); return; }
+        var result = {};
+        keys.forEach(function(k){
+          var getReq = store.get(k);
+          getReq.onsuccess = function(){
+            try{ result[k] = JSON.parse(getReq.result); }catch(e){}
+            pending--;
+            if(pending === 0){ if(cb) cb(true, result); }
+          };
+          getReq.onerror = function(){ pending--; if(pending===0){if(cb)cb(true,result);} };
+        });
+      };
+      req.onerror = function(){ if(cb) cb(false); };
+    }catch(e){ if(cb) cb(false); }
   },
   
   _loadFromLocalStorage: function(){
@@ -347,7 +430,6 @@ var DB = {
   get: function(key, def){
     var v = this._cache[key];
     if(v === undefined){
-      /* 兜底：直接从 localStorage 读 */
       try{
         var raw = localStorage.getItem(STORAGE_PREFIX+key);
         if(raw){ v = JSON.parse(raw); this._cache[key] = v; }
@@ -359,6 +441,8 @@ var DB = {
   set: function(key, val){
     this._cache[key] = val;
     try{ localStorage.setItem(STORAGE_PREFIX+key, JSON.stringify(val)); }catch(e){}
+    /* 异步写入IndexedDB备份 */
+    this._idbSet(key, val);
     /* 触发云端同步（防抖） */
     if(typeof CloudSync !== 'undefined') CloudSync.onDataChange(key, val);
   },
@@ -366,15 +450,19 @@ var DB = {
   remove: function(key){
     delete this._cache[key];
     localStorage.removeItem(STORAGE_PREFIX+key);
+    if(this._idbReady && this._idb){
+      try{
+        var tx = this._idb.transaction(['kv'], 'readwrite');
+        tx.objectStore('kv').delete(key);
+      }catch(e){}
+    }
   },
   
   getAllData: function(){
     var result = {};
-    /* 从缓存读 */
     for(var key in this._cache){
       if(this._cache.hasOwnProperty(key)) result[key] = this._cache[key];
     }
-    /* 也检查 localStorage 里的数据 */
     for(var i=0; i<localStorage.length; i++){
       var fullKey = localStorage.key(i);
       if(fullKey && fullKey.indexOf(STORAGE_PREFIX) === 0){
@@ -393,6 +481,7 @@ var DB = {
       if(allData.hasOwnProperty(key)){
         self._cache[key] = allData[key];
         try{ localStorage.setItem(STORAGE_PREFIX+key, JSON.stringify(allData[key])); }catch(e){}
+        self._idbSet(key, allData[key]);
       }
     }
   }
@@ -679,36 +768,61 @@ function processImportData(rawText){
 }
 
 /* 合并两个数组，按 id / time / date 字段去重 */
-function mergeArrays(oldArr, newArr){
-  var result = oldArr.slice();
-  var seen = {};
-  /* 生成已有记录的唯一标识 */
-  for(var i=0; i<result.length; i++){
-    var id = getRecordId(result[i]);
-    if(id) seen[id] = true;
-  }
-  /* 遍历新数据，只添加不存在的 */
-  for(var j=0; j<newArr.length; j++){
-    var nid = getRecordId(newArr[j]);
-    if(nid){
-      if(!seen[nid]){
-        seen[nid] = true;
-        result.push(newArr[j]);
-      }
-    }else{
-      /* 没有标识字段的，直接添加 */
-      result.push(newArr[j]);
+/* 带时间戳的数组合并：按记录ID去重，时间戳大的覆盖旧的 */
+function mergeArraysWithTS(arr1, arr2){
+  var map = {};
+  var noId = [];
+  /* 先放arr1 */
+  for(var i=0; i<arr1.length; i++){
+    var id = getRecordId(arr1[i]);
+    if(id){
+      map[id] = arr1[i];
+    } else {
+      noId.push(arr1[i]);
     }
   }
-  /* 如果有时间字段，按时间排序 */
+  /* 合并arr2 */
+  for(var j=0; j<arr2.length; j++){
+    var id2 = getRecordId(arr2[j]);
+    if(id2){
+      var existing = map[id2];
+      if(existing){
+        /* 比较时间戳，新的覆盖旧的 */
+        var ts1 = String(existing._ts || existing.id || '0');
+        var ts2 = String(arr2[j]._ts || arr2[j].id || '0');
+        if(ts2 > ts1){
+          map[id2] = arr2[j];
+        }
+      } else {
+        map[id2] = arr2[j];
+      }
+    } else {
+      noId.push(arr2[j]);
+    }
+  }
+  /* 组装结果 */
+  var result = [];
+  for(var k in map){
+    if(map.hasOwnProperty(k)) result.push(map[k]);
+  }
+  /* 添加无ID的记录 */
+  for(var m=0; m<noId.length; m++){
+    result.push(noId[m]);
+  }
+  /* 按时间排序 */
   if(result.length > 0 && (result[0].time || result[0].date)){
     result.sort(function(a,b){
-      var ta = a.time || a.date || '';
-      var tb = b.time || b.date || '';
+      var ta = (a.date||'') + (a.time||'');
+      var tb = (b.date||'') + (b.time||'');
       return ta < tb ? -1 : (ta > tb ? 1 : 0);
     });
   }
   return result;
+}
+
+/* 旧版mergeArrays保留向后兼容，内部调用新版本 */
+function mergeArrays(oldArr, newArr){
+  return mergeArraysWithTS(oldArr, newArr);
 }
 
 /* 生成记录唯一标识：优先用 id，其次 time+type，再次 date+type */
@@ -719,6 +833,111 @@ function getRecordId(rec){
   if(rec.time) return rec.time;
   if(rec.date) return rec.date;
   return null;
+}
+
+/* ====================================================
+   统一排序 + 详情弹窗系统
+   ==================================================== */
+
+/* 统一排序：按 date+time 倒序（最新在前） */
+function sortRecordsDesc(records){
+  return records.slice().sort(function(a, b){
+    var ta = (a.date || '') + 'T' + (a.time || a.startTime || '00:00');
+    var tb = (b.date || '') + 'T' + (b.time || b.startTime || '00:00');
+    return tb.localeCompare(ta);
+  });
+}
+
+/* 获取可见记录：过滤已删除 + 按日期筛选 + 倒序排序 */
+function getVisibleRecords(key, filterDate){
+  var records = DB.get(key, []);
+  if(!Array.isArray(records)) return [];
+  records = records.filter(function(r){ return !r._deletedAt; });
+  if(filterDate) records = records.filter(function(r){ return r.date === filterDate; });
+  return sortRecordsDesc(records);
+}
+
+/* 通用详情弹窗 */
+var DETAIL_FIELDS = {
+  feeding: [
+    {key:'date', label:'日期'}, {key:'time', label:'时间'},
+    {key:'amount', label:'奶量', suffix:'ml'}, {key:'member', label:'记录人'},
+    {key:'note', label:'备注', full:true}
+  ],
+  daily: [
+    {key:'date', label:'日期'}, {key:'type', label:'类型', map:{sleep:'睡眠',poop:'排便',pee:'排尿'}},
+    {key:'startTime', label:'开始时间'}, {key:'endTime', label:'结束时间'}, {key:'duration', label:'时长'},
+    {key:'color', label:'颜色'}, {key:'volume', label:'量'},
+    {key:'member', label:'记录人'}, {key:'note', label:'备注', full:true}
+  ],
+  nursing: [
+    {key:'date', label:'日期'}, {key:'time', label:'时间'},
+    {key:'item', label:'护理项'}, {key:'note', label:'备注', full:true},
+    {key:'member', label:'记录人'}
+  ],
+  health: [
+    {key:'date', label:'日期'}, {key:'time', label:'时间'},
+    {key:'item', label:'项目'}, {key:'value', label:'数值', suffix:'ml'},
+    {key:'member', label:'记录人'}
+  ],
+  food: [
+    {key:'date', label:'日期'}, {key:'time', label:'时间'},
+    {key:'foods', label:'食材/菜品'}, {key:'reaction', label:'不良反应'},
+    {key:'member', label:'记录人'}
+  ],
+  growth: [
+    {key:'date', label:'日期'}, {key:'height', label:'身高', suffix:'cm'},
+    {key:'weight', label:'体重', suffix:'kg'}, {key:'headCirc', label:'头围', suffix:'cm'},
+    {key:'member', label:'记录人'}, {key:'note', label:'备注', full:true}
+  ],
+  purchase: [
+    {key:'name', label:'物品'}, {key:'date', label:'采购日期'},
+    {key:'price', label:'单价', suffix:'元'}, {key:'quantity', label:'数量'},
+    {key:'total', label:'小计', suffix:'元'}, {key:'note', label:'备注', full:true},
+    {key:'member', label:'记录人'}
+  ],
+  earlyedu: [
+    {key:'date', label:'日期'}, {key:'time', label:'时间'},
+    {key:'item', label:'训练项目'}, {key:'member', label:'记录人'},
+    {key:'note', label:'训练备注', full:true}
+  ]
+};
+
+function showRecordDetail(title, record, module){
+  var fields = DETAIL_FIELDS[module] || [];
+  var html = '<div class="modal-header"><h3>' + title + '</h3><button class="modal-close" onclick="closeModal()">×</button></div>';
+  html += '<div style="padding:12px">';
+  fields.forEach(function(f){
+    var val = record[f.key];
+    if(val === undefined || val === '' || val === null) return;
+    var displayVal = val;
+    if(f.map){
+      if(typeof f.map === 'function') displayVal = f.map(val);
+      else displayVal = f.map[val] || val;
+    }
+    if(f.suffix) displayVal = displayVal + f.suffix;
+    if(f.full){
+      html += '<div style="padding:8px 0;border-bottom:1px solid #F0E8E4">';
+      html += '<div style="color:var(--text-sub);font-size:12px;margin-bottom:4px">' + f.label + '</div>';
+      html += '<div style="font-size:14px;line-height:1.6;word-break:break-all">' + displayVal + '</div>';
+      html += '</div>';
+    } else {
+      html += '<div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #F0E8E4">';
+      html += '<span style="color:var(--text-sub);font-size:13px">' + f.label + '</span>';
+      html += '<span style="font-weight:600;text-align:right;font-size:13px">' + displayVal + '</span>';
+      html += '</div>';
+    }
+  });
+  html += '</div>';
+  openModal(html);
+}
+
+/* 截取备注预览 */
+function notePreview(note, len){
+  if(!note) return '';
+  var n = parseInt(len) || 15;
+  if(note.length <= n) return note;
+  return note.substring(0, n) + '...';
 }
 
 /* 保存到手机：下载完整HTML文件到手机本地，离线可用，数据永不过期 */
@@ -776,10 +995,22 @@ var CloudSync = {
   lastSync: 0,
   debounceTimer: null,
   
+  /* 内置默认 Supabase 配置 */
+  _defaultConfig: {
+    url: 'https://yhnjngghlsygvyedqgkg.supabase.co',
+    anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlobmpuZ2dobHN5Z3Z5ZWRxZ2tnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODU1NzAxMjEsImV4cCI6MjEwMTE0NjEyMX0.PPSGZfUP-6BwbryylgJApr468ENY5_B4XSUjFLPob2U',
+    familyCode: 'hanyu2026'
+  },
+  
   init: function(cb){
     var self = this;
-    /* 从本地读取配置 */
+    /* 先读本地配置，没有或不全就用内置默认配置 */
     var cfg = DB.get('cloudConfig', null);
+    if(!cfg || !cfg.url || !cfg.anonKey || !cfg.familyCode || cfg.url === 'https://xxxx.supabase.co'){
+      cfg = self._defaultConfig;
+      DB.set('cloudConfig', cfg);
+      console.log('[CloudSync] 使用内置默认配置');
+    }
     if(cfg && cfg.url && cfg.anonKey && cfg.familyCode){
       self.config = cfg;
       self.enabled = true;
@@ -832,67 +1063,57 @@ var CloudSync = {
     
     var allData = DB.getAllData();
     
-    /* 先从云端拉取最新数据，合并后再推送（避免空数据覆盖云端） */
-    self._rawPull(function(cloudOk, cloudData){
-      var finalData = allData;
-      if(cloudOk && cloudData){
-        finalData = mergeCloudData(allData, cloudData);
-        /* 把合并后的数据写回本地 */
-        DB.replaceAllData(finalData);
-      }
-      
-      /* 如果本地和云端合并后仍然没数据，不推送 */
-      var dataCount = 0;
-      for(var k in finalData){ if(finalData.hasOwnProperty(k)) dataCount++; }
-      if(dataCount === 0){
-        self.syncing = false;
-        if(cb) cb(true, '无数据可同步');
-        return;
-      }
-      
-      var payload = {
-        family_code: self.config.familyCode,
-        data: finalData,
-        device: state.currentMember || 'unknown',
-        updated_at: new Date().toISOString()
-      };
-      var jsonStr = JSON.stringify(payload);
-      
-      try{
-        var xhr = new XMLHttpRequest();
-        /* 使用 upsert 方式：存在则更新，不存在则插入 */
-        xhr.open('POST', self.config.url + '/rest/v1/hanyu_data', true);
-        xhr.setRequestHeader('apikey', self.config.anonKey);
-        xhr.setRequestHeader('Authorization', 'Bearer ' + self.config.anonKey);
-        xhr.setRequestHeader('Content-Type', 'application/json');
-        xhr.setRequestHeader('Prefer', 'resolution=merge-duplicates');
-        xhr.onreadystatechange = function(){
-          if(xhr.readyState === 4){
-            self.syncing = false;
-            self.lastSync = Date.now();
-            if(xhr.status >= 200 && xhr.status < 300){
-              DB.set('lastCloudPush', new Date().toISOString());
-              if(cb) cb(true, '同步成功');
-            } else if(xhr.status === 404 || xhr.status === 0){
-              if(cb) cb(false, '数据表未创建或未开放访问权限');
-            } else {
-              var errMsg = xhr.status + '';
-              try{ var resp = JSON.parse(xhr.responseText); if(resp.message) errMsg = resp.message; }catch(e){}
-              console.log('[CloudSync] push error: ' + xhr.status + ' ' + xhr.responseText);
-              if(cb) cb(false, '上传失败(' + errMsg + ')');
-            }
-          }
-        };
-        xhr.onerror = function(){
+    /* 如果本地没数据，不推送（防止空数据覆盖云端） */
+    var dataCount = 0;
+    for(var k in allData){ if(allData.hasOwnProperty(k)) dataCount++; }
+    if(dataCount === 0){
+      self.syncing = false;
+      if(cb) cb(true, '无数据可同步');
+      return;
+    }
+    
+    var payload = {
+      family_code: self.config.familyCode,
+      data: allData,
+      device: state.currentMember || 'unknown',
+      updated_at: new Date().toISOString()
+    };
+    var jsonStr = JSON.stringify(payload);
+    
+    try{
+      var xhr = new XMLHttpRequest();
+      /* 使用 upsert 方式：存在则更新，不存在则插入 */
+      xhr.open('POST', self.config.url + '/rest/v1/hanyu_data', true);
+      xhr.setRequestHeader('apikey', self.config.anonKey);
+      xhr.setRequestHeader('Authorization', 'Bearer ' + self.config.anonKey);
+      xhr.setRequestHeader('Content-Type', 'application/json');
+      xhr.setRequestHeader('Prefer', 'resolution=merge-duplicates');
+      xhr.onreadystatechange = function(){
+        if(xhr.readyState === 4){
           self.syncing = false;
-          if(cb) cb(false, '网络请求失败');
-        };
-        xhr.send(jsonStr);
-      }catch(e){
+          self.lastSync = Date.now();
+          if(xhr.status >= 200 && xhr.status < 300){
+            DB.set('lastCloudPush', new Date().toISOString());
+            if(cb) cb(true, '同步成功');
+          } else if(xhr.status === 404 || xhr.status === 0){
+            if(cb) cb(false, '数据表未创建或未开放访问权限');
+          } else {
+            var errMsg = xhr.status + '';
+            try{ var resp = JSON.parse(xhr.responseText); if(resp.message) errMsg = resp.message; }catch(e){}
+            console.log('[CloudSync] push error: ' + xhr.status + ' ' + xhr.responseText);
+            if(cb) cb(false, '上传失败(' + errMsg + ')');
+          }
+        }
+      };
+      xhr.onerror = function(){
         self.syncing = false;
-        if(cb) cb(false, '请求异常');
-      }
-    });
+        if(cb) cb(false, '网络请求失败');
+      };
+      xhr.send(jsonStr);
+    }catch(e){
+      self.syncing = false;
+      if(cb) cb(false, '请求异常');
+    }
   },
   
   /* 内部方法：只拉取云端原始数据，不合并到本地 */
@@ -949,12 +1170,20 @@ var CloudSync = {
             try{
               var rows = JSON.parse(xhr.responseText);
               if(rows && rows.length > 0 && rows[0].data){
-                /* 合并云端数据到本地（只新增不覆盖） */
+                /* 时间戳合并+删除标记 */
                 var cloudData = rows[0].data;
+                var cloudTS = rows[0].updated_at;
                 var localData = DB.getAllData();
                 var merged = mergeCloudData(localData, cloudData);
+                /* 清理超过30天的已删除记录 */
+                merged = cleanupDeletedRecords(merged);
                 DB.replaceAllData(merged);
                 DB.set('lastCloudPull', new Date().toISOString());
+                /* 如果本地有更新且云端更旧，自动push */
+                var localPushAt = DB.get('lastCloudPush', '1970-01-01T00:00:00Z');
+                if(localPushAt > cloudTS){
+                  self.push(function(){});
+                }
                 if(cb) cb(true, '拉取成功(' + Object.keys(cloudData).length + '项数据)');
               } else {
                 console.log('[CloudSync] pull: rows=' + JSON.stringify(rows));
@@ -999,14 +1228,14 @@ var CloudSync = {
   manualSync: function(cb){
     var self = this;
     if(!self.enabled){ if(cb)cb(false,'未配置云端'); return; }
-    /* 先拉取再推送 */
-    self.pull(function(ok, pullMsg){
-      console.log('[CloudSync] pull result: ' + ok + ' ' + pullMsg);
-      self.push(function(ok2, pushMsg){
-        console.log('[CloudSync] push result: ' + ok2 + ' ' + pushMsg);
-        if(ok2){
+    /* 先推送本地数据到云端（覆盖旧数据），再拉取确认 */
+    self.push(function(ok1, pushMsg){
+      console.log('[CloudSync] push result: ' + ok1 + ' ' + pushMsg);
+      self.pull(function(ok2, pullMsg){
+        console.log('[CloudSync] pull result: ' + ok2 + ' ' + pullMsg);
+        if(ok1){
           if(cb) cb(true, '同步成功');
-        } else if(ok){
+        } else if(ok2){
           if(cb) cb(true, '拉取成功');
         } else {
           if(cb) cb(false, pushMsg || pullMsg || '同步失败');
@@ -1016,38 +1245,120 @@ var CloudSync = {
   }
 };
 
-/* 合并云端数据和本地数据（按记录ID去重） */
+/* 合并云端数据和本地数据（时间戳合并+删除标记） */
 function mergeCloudData(localData, cloudData){
   var merged = {};
-  /* 先复制本地数据 */
-  for(var k in localData){
-    if(localData.hasOwnProperty(k)) merged[k] = localData[k];
-  }
-  /* 合并云端数据 */
-  for(var key in cloudData){
-    if(!cloudData.hasOwnProperty(key)) continue;
-    if(merged[key] === undefined){
-      merged[key] = cloudData[key];
-    } else if(Array.isArray(merged[key]) && Array.isArray(cloudData[key])){
-      merged[key] = mergeArrays(merged[key], cloudData[key]);
-    } else if(merged[key] && typeof merged[key] === 'object' && cloudData[key] && typeof cloudData[key] === 'object'){
-      if(merged[key].logs && cloudData[key].logs){
-        merged[key].logs = mergeArrays(merged[key].logs, cloudData[key].logs);
-      }
-      if(merged[key].reactions && cloudData[key].reactions){
-        merged[key].reactions = mergeArrays(merged[key].reactions, cloudData[key].reactions);
-      }
-      for(var k2 in cloudData[key]){
-        if(cloudData[key].hasOwnProperty(k2) && k2 !== 'logs' && k2 !== 'reactions'){
-          if(merged[key][k2] === undefined) merged[key][k2] = cloudData[key][k2];
-        }
-      }
+  var allKeys = {};
+  for(var k in localData){ if(localData.hasOwnProperty(k)) allKeys[k] = true; }
+  for(var k2 in cloudData){ if(cloudData.hasOwnProperty(k2)) allKeys[k2] = true; }
+
+  for(var key in allKeys){
+    if(!allKeys.hasOwnProperty(key)) continue;
+    var local = localData[key];
+    var cloud = cloudData[key];
+
+    if(local === undefined){
+      /* 本地没有，云端有 */
+      merged[key] = cloud;
+    } else if(cloud === undefined){
+      /* 云端没有，本地有 */
+      merged[key] = local;
+    } else if(Array.isArray(local) && Array.isArray(cloud)){
+      /* 数组按ID合并，时间戳大的覆盖 */
+      merged[key] = mergeArraysWithTS(local, cloud);
+    } else if(local && typeof local === 'object' && cloud && typeof cloud === 'object'){
+      /* 对象级合并 */
+      merged[key] = mergeRecords(local, cloud);
     } else {
-      /* 云端有本地没有的非数组数据，直接采用 */
-      if(merged[key] === undefined) merged[key] = cloudData[key];
+      /* 标量：本地优先 */
+      merged[key] = local;
     }
   }
+  /* 规范化：确保earlyedu是数组格式（兼容旧版对象格式） */
+  if(merged.earlyedu && !Array.isArray(merged.earlyedu)){
+    var oldObj = merged.earlyedu;
+    var newArr = [];
+    for(var ek in oldObj){
+      if(oldObj.hasOwnProperty(ek) && oldObj[ek] && oldObj[ek].done){
+        newArr.push({id:'migrated_'+ek+'_'+Date.now(),item:ek,date:oldObj[ek].date||todayStr(),time:'',note:'',member:oldObj[ek].member||'',_ts:String(Date.now())});
+      }
+    }
+    merged.earlyedu = newArr;
+  }
   return merged;
+}
+function mergeRecords(local, cloud){
+  var result = {};
+  for(var k in local){
+    if(local.hasOwnProperty(k)) result[k] = local[k];
+  }
+  for(var k2 in cloud){
+    if(!cloud.hasOwnProperty(k2)) continue;
+    if(result[k2] === undefined){
+      result[k2] = cloud[k2];
+    } else if(Array.isArray(result[k2]) && Array.isArray(cloud[k2])){
+      result[k2] = mergeArraysWithTS(result[k2], cloud[k2]);
+    } else if(result[k2] && typeof result[k2] === 'object' && cloud[k2] && typeof cloud[k2] === 'object'){
+      if(result[k2].logs && cloud[k2].logs){
+        result[k2].logs = mergeArraysWithTS(result[k2].logs, cloud[k2].logs);
+      }
+      if(result[k2].reactions && cloud[k2].reactions){
+        result[k2].reactions = mergeArraysWithTS(result[k2].reactions, cloud[k2].reactions);
+      }
+    }
+  }
+  return result;
+}
+
+/* 清理超过30天的已删除记录 */
+function cleanupDeletedRecords(data){
+  var now = Date.now();
+  var cutoff = now - 30 * 24 * 60 * 60 * 1000;
+  for(var key in data){
+    if(!data.hasOwnProperty(key)) continue;
+    if(Array.isArray(data[key])){
+      data[key] = data[key].filter(function(r){
+        if(r._deletedAt){
+          var ts = new Date(r._deletedAt).getTime();
+          if(ts < cutoff) return false;
+        }
+        return true;
+      });
+    } else if(data[key] && typeof data[key] === 'object'){
+      if(data[key].logs){
+        data[key].logs = data[key].logs.filter(function(r){
+          if(r._deletedAt){
+            var ts = new Date(r._deletedAt).getTime();
+            if(ts < cutoff) return false;
+          }
+          return true;
+        });
+      }
+      if(data[key].reactions){
+        data[key].reactions = data[key].reactions.filter(function(r){
+          if(r._deletedAt){
+            var ts = new Date(r._deletedAt).getTime();
+            if(ts < cutoff) return false;
+          }
+          return true;
+        });
+      }
+    }
+  }
+  return data;
+}
+
+/* 启动定时轮询同步（每60秒拉取云端最新数据） */
+var _syncPollTimer = null;
+function startSyncPolling(){
+  if(_syncPollTimer) clearInterval(_syncPollTimer);
+  _syncPollTimer = setInterval(function(){
+    if(CloudSync.enabled && !CloudSync.syncing){
+      CloudSync.pull(function(ok){
+        if(ok) renderModule(state.currentModule);
+      });
+    }
+  }, 60000);
 }
 
 /* 打开云端配置弹窗 */
@@ -1200,7 +1511,7 @@ function copySQL(){
 /* ====================================================
    PWA Service Worker 注册（内联模式，无需外部文件）
    ==================================================== */
-var APP_VERSION = 'v2.0-pwa';
+var APP_VERSION = 'v3.1';
 
 /* 动态生成 manifest 作为 blob URL */
 function setupManifest(){
@@ -1239,12 +1550,10 @@ function setupManifest(){
 /* 生成 Service Worker 代码为 blob URL 并注册 */
 function setupServiceWorker(){
   if(!('serviceWorker' in navigator)) return;
-  /* 只在 https 或 localhost 下注册 */
   if(location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') return;
   
   var swCode = [
-    'var CACHE_NAME = "hanyu-baby-' + APP_VERSION + '";',
-    'var CACHE_STATIC = "hanyu-static-' + APP_VERSION + '";',
+    'var CACHE_VER = "hanyu-v3.1";',
     '',
     'self.addEventListener("install", function(e){',
     '  self.skipWaiting();',
@@ -1254,19 +1563,37 @@ function setupServiceWorker(){
     '  e.waitUntil(',
     '    caches.keys().then(function(names){',
     '      return Promise.all(names.map(function(name){',
-    '        if(name !== CACHE_NAME && name !== CACHE_STATIC) return caches.delete(name);',
+    '        if(name !== CACHE_VER) return caches.delete(name);',
     '      }));',
-    '    }).then(function(){ return self.clients.claim(); })',
+    '    }).then(function(){',
+    '      self.clients.claim();',
+    '      return self.clients.matchAll().then(function(clients){',
+    '        clients.forEach(function(c){ c.postMessage({type:"SW_UPDATED", version:CACHE_VER}); });',
+    '      });',
+    '    })',
     '  );',
     '});',
     '',
     'self.addEventListener("fetch", function(e){',
-    '  var url = new URL(e.request.url);',
     '  if(e.request.method !== "GET") return;',
-    '  /* 只缓存同源请求 */',
+    '  var url = new URL(e.request.url);',
     '  if(url.origin !== self.location.origin) return;',
+    '  /* HTML请求: network-first 确保拿到最新版本 */',
+    '  if(e.request.mode === "navigate" || e.request.destination === "document"){',
+    '    e.respondWith(',
+    '      fetch(e.request).then(function(response){',
+    '        var clone = response.clone();',
+    '        caches.open(CACHE_VER).then(function(cache){ cache.put(e.request, clone); });',
+    '        return response;',
+    '      }).catch(function(){',
+    '        return caches.match(e.request);',
+    '      })',
+    '    );',
+    '    return;',
+    '  }',
+    '  /* 静态资源: stale-while-revalidate */',
     '  e.respondWith(',
-    '    caches.open(CACHE_NAME).then(function(cache){',
+    '    caches.open(CACHE_VER).then(function(cache){',
     '      return cache.match(e.request).then(function(cached){',
     '        var fetchPromise = fetch(e.request).then(function(response){',
     '          if(response && response.status === 200){',
@@ -1290,16 +1617,20 @@ function setupServiceWorker(){
     var swUrl = URL.createObjectURL(blob);
     navigator.serviceWorker.register(swUrl, {scope:'./'}).then(function(reg){
       console.log('[PWA] Service Worker 注册成功');
-      /* 检查更新 */
       reg.addEventListener('updatefound', function(){
         var newWorker = reg.installing;
         if(newWorker){
           newWorker.addEventListener('statechange', function(){
             if(newWorker.state === 'installed' && navigator.serviceWorker.controller){
-              /* 有新版本，提示用户 */
-              showToastTip('🔄 应用已更新，重新打开即可生效', 4000);
+              showToastTip('应用已更新，正在刷新...', 3000);
+              setTimeout(function(){ location.reload(); }, 1000);
             }
           });
+        }
+      });
+      navigator.serviceWorker.addEventListener('message', function(e){
+        if(e.data && e.data.type === 'SW_UPDATED'){
+          showToastTip('已更新到最新版本', 3000);
         }
       });
     }).catch(function(e){
@@ -1371,10 +1702,37 @@ function renderHome(){
 
     '<div class="card"><div class="card-title"><span class="left"><span class="icon">💩</span>今日排便</span><button class="btn btn-sm btn-ghost" onclick="navigate(\'daily\')">记录</button></div>'+poopPreview+'</div>'+
 
-    (vaccineInfo?'<div class="card" style="border-left:4px solid var(--c-rose-deep)"><div class="card-title"><span class="left"><span class="icon">💉</span>疫苗待办提醒</span></div>'+
-    '<div style="font-size:13px"><b>'+vaccineInfo.name+'</b> <span class="badge '+(vaccineInfo.type==='免费'?'badge-free':'badge-paid')+'">'+vaccineInfo.type+'</span></div>'+
-    '<div class="tip warn">📅 建议接种时间：'+vaccineInfo.ageText+(vaccineInfo.overdue?'（已到时间，请尽快接种）':'')+'</div>'+
-    '<button class="btn btn-sm btn-ghost" style="margin-top:8px" onclick="navigate(\'vaccine\')">查看疫苗计划</button></div>':'')+
+    (function(){
+      var reminders = getVaccineReminders();
+      var vacHtml = '';
+      if(reminders.length > 0){
+        vacHtml = '<div class="card" style="border-left:4px solid var(--c-rose-deep)"><div class="card-title"><span class="left"><span class="icon">💉</span>疫苗提醒</span><button class="btn btn-sm btn-ghost" onclick="navigate(\'vaccine\')">查看全部</button></div>';
+        reminders.slice(0,3).forEach(function(r){
+          var color = r.type === 'overdue' ? '#DC2626' : '#D97706';
+          var icon = r.type === 'overdue' ? '⏰' : '📅';
+          vacHtml += '<div class="record-item" style="cursor:pointer" onclick="navigate(\'vaccine\')"><div class="ri-main"><div class="ri-content" style="color:'+color+';font-size:13px">'+icon+' '+r.message+'</div>';
+          if(r.vaccine.precaution){
+            vacHtml += '<div class="ri-time" style="color:#999">⚠️ '+notePreview(r.vaccine.precaution, 30)+'</div>';
+          }
+          vacHtml += '</div></div>';
+        });
+        vacHtml += '</div>';
+      }
+      return vacHtml;
+    })()+
+
+    (function(){
+      var todos = getEarlyEduTodos();
+      if(todos.length === 0) return '';
+      var todoHtml = '<div class="card" style="border-left:4px solid var(--c-purple-deep)"><div class="card-title"><span class="left"><span class="icon">🧠</span>早教今日待办</span><button class="btn btn-sm btn-ghost" onclick="navigate(\'earlyedu\')">查看全部</button></div>';
+      todoHtml += '<div style="font-size:12px;color:var(--text-sub);margin-bottom:8px">今日还有 '+todos.length+' 项早教任务待完成</div>';
+      todos.slice(0,4).forEach(function(t){
+        var contentTip = t.content ? '<div style="font-size:11px;color:#999;margin-top:2px">'+notePreview(t.content, 20)+'</div>' : '';
+        todoHtml += '<div class="record-item" style="cursor:pointer" onclick="navigate(\'earlyedu\')"><span style="font-size:18px">'+t.icon+'</span><div class="ri-main"><div class="ri-content" style="font-size:13px">'+t.label+'</div>'+contentTip+'</div><span style="color:var(--c-purple-deep);font-size:12px;white-space:nowrap">去打卡 ›</span></div>';
+      });
+      todoHtml += '</div>';
+      return todoHtml;
+    })()+
 
     '<div class="card"><div class="card-title"><span class="left"><span class="icon">⚡</span>快捷入口</span></div><div class="quick-grid">'+
     NAV_ITEMS.slice(1).map(function(it){return '<div class="quick-item" onclick="navigate(\''+it.id+'\')"><span class="icon">'+it.icon+'</span><div class="label">'+it.label+'</div></div>';}).join('')+'</div></div>'+
@@ -1579,38 +1937,38 @@ function getWhoBoy(ageM){
 }
 
 var VACCINE_LIST = [
-  {age:0,ageText:'出生时',name:'乙肝疫苗(第1剂)',type:'免费',desc:'出生24小时内接种'},
-  {age:0,ageText:'出生时',name:'卡介苗(BCG)',type:'免费',desc:'预防结核病'},
-  {age:1,ageText:'1月龄',name:'乙肝疫苗(第2剂)',type:'免费',desc:''},
-  {age:2,ageText:'2月龄',name:'脊灰灭活疫苗(第1剂)',type:'免费',desc:''},
-  {age:2,ageText:'2月龄',name:'13价肺炎疫苗(第1剂)',type:'自费',desc:'预防肺炎链球菌'},
-  {age:3,ageText:'3月龄',name:'脊灰减毒/灭活(第2剂)',type:'免费',desc:''},
-  {age:3,ageText:'3月龄',name:'百白破(第1剂)',type:'免费',desc:''},
-  {age:3,ageText:'3月龄',name:'13价肺炎疫苗(第2剂)',type:'自费',desc:''},
-  {age:4,ageText:'4月龄',name:'脊灰(第3剂)',type:'免费',desc:''},
-  {age:4,ageText:'4月龄',name:'百白破(第2剂)',type:'免费',desc:''},
-  {age:4,ageText:'4月龄',name:'13价肺炎疫苗(第3剂)',type:'自费',desc:''},
-  {age:5,ageText:'5月龄',name:'百白破(第3剂)',type:'免费',desc:''},
-  {age:6,ageText:'6月龄',name:'乙肝疫苗(第3剂)',type:'免费',desc:''},
-  {age:6,ageText:'6月龄',name:'A群流脑疫苗(第1剂)',type:'免费',desc:''},
-  {age:6,ageText:'6月龄',name:'EV71手足口疫苗(第1剂)',type:'自费',desc:''},
-  {age:7,ageText:'7月龄',name:'EV71手足口疫苗(第2剂)',type:'自费',desc:''},
-  {age:8,ageText:'8月龄',name:'麻腮风(第1剂)',type:'免费',desc:''},
-  {age:8,ageText:'8月龄',name:'乙脑减毒(第1剂)',type:'免费',desc:''},
-  {age:9,ageText:'9月龄',name:'A群流脑疫苗(第2剂)',type:'免费',desc:''},
-  {age:12,ageText:'12月龄',name:'水痘疫苗(第1剂)',type:'自费',desc:''},
-  {age:12,ageText:'12月龄',name:'13价肺炎疫苗(加强)',type:'自费',desc:''},
-  {age:18,ageText:'18月龄',name:'百白破(第4剂)',type:'免费',desc:''},
-  {age:18,ageText:'18月龄',name:'麻腮风(第2剂)',type:'免费',desc:''},
-  {age:18,ageText:'18月龄',name:'甲肝减毒(第1剂)',type:'免费',desc:''},
-  {age:18,ageText:'18月龄',name:'水痘疫苗(第2剂)',type:'自费',desc:''},
-  {age:24,ageText:'2岁',name:'乙脑减毒(第2剂)',type:'免费',desc:''},
-  {age:24,ageText:'2岁',name:'甲肝灭活(第2剂)',type:'免费/自费',desc:''},
-  {age:3,ageText:'3岁',name:'A+C群流脑疫苗(第1剂)',type:'免费',desc:''},
-  {age:3,ageText:'3岁',name:'流感疫苗',type:'自费',desc:'每年秋季接种'},
-  {age:4,ageText:'4岁',name:'脊灰(第4剂)',type:'免费',desc:''},
-  {age:6,ageText:'6岁',name:'白破疫苗',type:'免费',desc:''},
-  {age:6,ageText:'6岁',name:'A+C群流脑疫苗(第2剂)',type:'免费',desc:''}
+  {age:0,ageText:'出生时',name:'乙肝疫苗(第1剂)',type:'免费',desc:'出生24小时内接种',precaution:'出生后立即接种，最迟不超过24小时。早产儿体重<2000g需补种。接种后观察注射部位有无红肿'},
+  {age:0,ageText:'出生时',name:'卡介苗(BCG)',type:'免费',desc:'预防结核病',precaution:'接种后2-3周局部出现红肿化脓为正常反应，保持干燥即可。不可热敷。溃破后涂紫药水'},
+  {age:1,ageText:'1月龄',name:'乙肝疫苗(第2剂)',type:'免费',desc:'',precaution:'接种前确认宝宝无发热、腹泻。接种后24小时内保持注射部位干燥，勿洗澡'},
+  {age:2,ageText:'2月龄',name:'脊灰灭活疫苗(第1剂)',type:'免费',desc:'',precaution:'接种后少数宝宝可能低烧（38度以下），多饮水即可。如高烧不退需就医'},
+  {age:2,ageText:'2月龄',name:'13价肺炎疫苗(第1剂)',type:'自费',desc:'预防肺炎链球菌',precaution:'接种后可能局部红肿、低烧。与免费疫苗间隔14天以上接种。前后3天避免换奶粉'},
+  {age:3,ageText:'3月龄',name:'脊灰减毒/灭活(第2剂)',type:'免费',desc:'',precaution:'口服疫苗前后30分钟禁食禁水。注射型则保持注射部位干燥24小时'},
+  {age:3,ageText:'3月龄',name:'百白破(第1剂)',type:'免费',desc:'',precaution:'接种后可能发热38度以下、局部硬结。冷敷硬结处。如持续高烧需就医。接种当天不洗澡'},
+  {age:3,ageText:'3月龄',name:'13价肺炎疫苗(第2剂)',type:'自费',desc:'',precaution:'与第1剂间隔至少4周。接种后观察30分钟无异常再离开'},
+  {age:4,ageText:'4月龄',name:'脊灰(第3剂)',type:'免费',desc:'',precaution:'口服型前后30分钟禁食禁水。注意接种后48小时内有无腹泻'},
+  {age:4,ageText:'4月龄',name:'百白破(第2剂)',type:'免费',desc:'',precaution:'接种部位可能出现硬结，2-4周自行消退。可热敷促进吸收（24小时后）'},
+  {age:4,ageText:'4月龄',name:'13价肺炎疫苗(第3剂)',type:'自费',desc:'',precaution:'完成3剂基础免疫。接种后多饮水，注意观察体温变化'},
+  {age:5,ageText:'5月龄',name:'百白破(第3剂)',type:'免费',desc:'',precaution:'基础免疫最后一剂。接种后可能出现烦躁、食欲下降，1-2天恢复'},
+  {age:6,ageText:'6月龄',name:'乙肝疫苗(第3剂)',type:'免费',desc:'',precaution:'完成乙肝基础免疫。接种后查抗体（1-2个月后可查乙肝表面抗体）'},
+  {age:6,ageText:'6月龄',name:'A群流脑疫苗(第1剂)',type:'免费',desc:'',precaution:'接种后少数宝宝出现低烧、皮疹。多饮水。与第2剂间隔至少3个月'},
+  {age:6,ageText:'6月龄',name:'EV71手足口疫苗(第1剂)',type:'自费',desc:'',precaution:'预防EV71型手足口病。接种后观察30分钟。与第2剂间隔至少28天'},
+  {age:7,ageText:'7月龄',name:'EV71手足口疫苗(第2剂)',type:'自费',desc:'',precaution:'完成2剂免疫程序。接种后少数出现发热、接种部位红肿'},
+  {age:8,ageText:'8月龄',name:'麻腮风(第1剂)',type:'免费',desc:'',precaution:'接种后6-12天可能出现轻微皮疹、低烧，属正常反应。如高烧3天以上需就医。接种前后1个月避免使用免疫球蛋白'},
+  {age:8,ageText:'8月龄',name:'乙脑减毒(第1剂)',type:'免费',desc:'',precaution:'接种后少数出现发热、皮疹。接种部位保持干燥24小时。与麻腮风可同时接种'},
+  {age:9,ageText:'9月龄',name:'A群流脑疫苗(第2剂)',type:'免费',desc:'',precaution:'完成流脑基础免疫。接种后多饮水，注意观察体温'},
+  {age:12,ageText:'12月龄',name:'水痘疫苗(第1剂)',type:'自费',desc:'',precaution:'接种后1-3周可能出现轻微水痘样皮疹，有传染性需注意。避免接触孕妇和免疫缺陷者'},
+  {age:12,ageText:'12月龄',name:'13价肺炎疫苗(加强)',type:'自费',desc:'',precaution:'加强针。接种后观察30分钟。确认之前完成3剂基础免疫'},
+  {age:18,ageText:'18月龄',name:'百白破(第4剂)',type:'免费',desc:'',precaution:'加强针。接种后可能局部硬结较大，属正常。24小时内不洗澡'},
+  {age:18,ageText:'18月龄',name:'麻腮风(第2剂)',type:'免费',desc:'',precaution:'加强针。与第1剂间隔至少6个月。接种后注意观察皮疹和体温'},
+  {age:18,ageText:'18月龄',name:'甲肝减毒(第1剂)',type:'免费',desc:'',precaution:'接种后少数出现低烧、食欲下降。保持注射部位干燥'},
+  {age:18,ageText:'18月龄',name:'水痘疫苗(第2剂)',type:'自费',desc:'',precaution:'与第1剂间隔至少6个月。接种后注意观察有无皮疹出现'},
+  {age:24,ageText:'2岁',name:'乙脑减毒(第2剂)',type:'免费',desc:'',precaution:'加强针。接种后多饮水，注意体温变化'},
+  {age:24,ageText:'2岁',name:'甲肝灭活(第2剂)',type:'免费/自费',desc:'',precaution:'与第1剂间隔6-12个月。接种后观察30分钟'},
+  {age:36,ageText:'3岁',name:'A+C群流脑疫苗(第1剂)',type:'免费',desc:'',precaution:'替代A群流脑。接种后观察有无发热、皮疹'},
+  {age:36,ageText:'3岁',name:'流感疫苗',type:'自费',desc:'每年秋季接种',precaution:'每年秋季接种1剂。对鸡蛋过敏者禁用。接种后注意观察24小时'},
+  {age:48,ageText:'4岁',name:'脊灰(第4剂)',type:'免费',desc:'',precaution:'加强针。口服型前后30分钟禁食禁水'},
+  {age:72,ageText:'6岁',name:'白破疫苗',type:'免费',desc:'',precaution:'加强针。接种后局部可能硬结较大，可热敷（24小时后）'},
+  {age:72,ageText:'6岁',name:'A+C群流脑疫苗(第2剂)',type:'免费',desc:'',precaution:'与第1剂间隔3年。接种后多饮水，观察体温'}
 ];
 
 function getNextVaccine(){
@@ -1624,6 +1982,73 @@ function getNextVaccine(){
   return null;
 }
 
+/* 获取疫苗提醒列表 */
+function getVaccineReminders(){
+  var vac=DB.get('vaccine',{}), ageM=ageMonthsTotal();
+  var reminders=[];
+  VACCINE_LIST.forEach(function(v){
+    var rec = vac[v.name];
+    /* 已按时接种、延迟接种、不接种的都不再提醒 */
+    if(rec && (rec.status==='done' || rec.status==='delayed' || rec.status==='skip')) return;
+    if(v.age >= ageM && v.age <= ageM+2){
+      reminders.push({type:'due', vaccine:v, message:v.ageText+' '+v.name+' 即将接种'});
+    } else if(v.age < ageM && v.age >= ageM-3){
+      reminders.push({type:'overdue', vaccine:v, message:v.ageText+' '+v.name+' 已到接种时间'});
+    }
+  });
+  return reminders;
+}
+
+/* 疫苗排序 */
+function getVaccineOrder(){
+  return DB.get('vaccineOrder', VACCINE_LIST.map(function(v){return v.name;}));
+}
+function saveVaccineOrder(order){
+  DB.set('vaccineOrder', order);
+}
+
+/* 拖拽排序状态 */
+var _vacDrag = {active:false, srcIdx:-1, overIdx:-1, startY:0, timer:null};
+
+function vacRowTouchStart(e, idx){
+  _vacDrag.startY = e.touches[0].clientY;
+  _vacDrag.srcIdx = idx;
+  _vacDrag.timer = setTimeout(function(){
+    _vacDrag.active = true;
+    if(navigator.vibrate) navigator.vibrate(50);
+  }, 500);
+}
+
+function vacRowTouchMove(e){
+  if(!_vacDrag.active) return;
+  e.preventDefault();
+  var y = e.touches[0].clientY;
+  var rows = document.querySelectorAll('tr[data-vac-idx]');
+  for(var i=0; i<rows.length; i++){
+    var rect = rows[i].getBoundingClientRect();
+    if(y >= rect.top && y <= rect.bottom){
+      _vacDrag.overIdx = parseInt(rows[i].dataset.vacIdx);
+      rows.forEach(function(r){ r.style.borderColor=''; });
+      rows[i].style.borderColor = 'var(--c-pink-deep)';
+      break;
+    }
+  }
+}
+
+function vacRowTouchEnd(e){
+  clearTimeout(_vacDrag.timer);
+  if(_vacDrag.active && _vacDrag.overIdx >= 0 && _vacDrag.srcIdx !== _vacDrag.overIdx){
+    var order = getVaccineOrder();
+    var moved = order.splice(_vacDrag.srcIdx, 1)[0];
+    order.splice(_vacDrag.overIdx, 0, moved);
+    saveVaccineOrder(order);
+    renderModule('vaccine');
+  }
+  _vacDrag.active = false;
+  _vacDrag.srcIdx = -1;
+  _vacDrag.overIdx = -1;
+}
+
 setStatus('内置数据加载完成');
 </script>
 <script>
@@ -1632,7 +2057,7 @@ setStatus('内置数据加载完成');
    ==================================================== */
 function renderFeeding(){
   var feeding=DB.get('feeding',[]);
-  var filtered=state.filterDate?feeding.filter(function(f){return f.date===state.filterDate;}):feeding.slice(-30).reverse();
+  var filtered=getVisibleRecords('feeding', state.filterDate).slice(0,30);
   var todayMilk=feeding.filter(function(f){return f.date===todayStr();}).reduce(function(s,f){return s+(+f.amount||0);},0);
   var todayCount=feeding.filter(function(f){return f.date===todayStr();}).length;
 
@@ -1736,7 +2161,7 @@ setStatus('喂养记录加载完成');
    ==================================================== */
 function renderDaily(){
   var daily=DB.get('daily',[]);
-  var filtered=state.filterDate?daily.filter(function(d){return d.date===state.filterDate;}):daily.slice(-20).reverse();
+  var filtered=getVisibleRecords('daily', state.filterDate).slice(0,20);
 
   var html=subHeader('😴','日常记录')+memberBar()+
     '<div class="filter-bar"><input type="date" id="dailyFilter" value="'+state.filterDate+'" onchange="state.filterDate=this.value;renderModule(\'daily\')">'+
@@ -1945,23 +2370,37 @@ setStatus('生长发育加载完成');
 /* ====================================================
    护理记录
    ==================================================== */
-var NURSING_ITEMS = [
-  {key:'bath',icon:'🛁',label:'洗澡',interval:{春:2,夏:1,秋:2,冬:2}},
-  {key:'swim',icon:'🏊',label:'游泳',interval:{春:7,夏:7,秋:7,冬:14}},
-  {key:'nail',icon:'💅',label:'剪指甲',interval:{春:7,夏:7,秋:7,冬:10}},
-  {key:'haircut',icon:'💇',label:'理发',interval:{春:30,夏:30,秋:30,冬:60}},
-  {key:'wash',icon:'🧴',label:'洗手',interval:{春:1,夏:1,秋:1,冬:1}},
-  {key:'clean',icon:'🧻',label:'口鼻耳清洁',interval:{春:2,夏:2,秋:2,冬:2}},
-  {key:'facewash',icon:'💦',label:'洗脸',interval:{春:1,夏:1,秋:1,冬:1}},
-  {key:'moisture',icon:'🧴',label:'保湿',interval:{春:1,夏:1,秋:1,冬:1}}
+var NURSING_ITEMS_DEFAULT = [
+  {key:'bath',icon:'🛁',label:'洗澡',interval:{春:2,夏:1,秋:2,冬:2},custom:false},
+  {key:'swim',icon:'🏊',label:'游泳',interval:{春:7,夏:7,秋:7,冬:14},custom:false},
+  {key:'nail',icon:'💅',label:'剪指甲',interval:{春:7,夏:7,秋:7,冬:10},custom:false},
+  {key:'haircut',icon:'💇',label:'理发',interval:{春:30,夏:30,秋:30,冬:60},custom:false},
+  {key:'wash',icon:'🧴',label:'洗手',interval:{春:1,夏:1,秋:1,冬:1},custom:false},
+  {key:'clean',icon:'🧻',label:'口鼻耳清洁',interval:{春:2,夏:2,秋:2,冬:2},custom:false},
+  {key:'facewash',icon:'💦',label:'洗脸',interval:{春:1,夏:1,秋:1,冬:1},custom:false},
+  {key:'moisture',icon:'🧴',label:'保湿',interval:{春:1,夏:1,秋:1,冬:1},custom:false}
 ];
+
+function getNursingItems(){
+  var custom = DB.get('nursingCustom', []);
+  return NURSING_ITEMS_DEFAULT.concat(custom);
+}
+
+function getNursingItemLabel(key){
+  var items = getNursingItems();
+  for(var i=0; i<items.length; i++){
+    if(items[i].key === key) return items[i];
+  }
+  return null;
+}
 
 function renderNursing(){
   var nursing=DB.get('nursing',[]), season=getSeason();
+  var items = getNursingItems();
 
-  var cards=NURSING_ITEMS.map(function(it){
+  var cards=items.map(function(it){
     var last=null;
-    for(var i=nursing.length-1;i>=0;i--){ if(nursing[i].item===it.key){last=nursing[i];break;} }
+    for(var i=nursing.length-1;i>=0;i--){ if(nursing[i].item===it.key && !nursing[i]._deletedAt){last=nursing[i];break;} }
     var interval=it.interval[season], tip='';
     if(last){
       var lastDt=new Date(last.date+'T'+last.time), next=new Date(lastDt);
@@ -1971,24 +2410,51 @@ function renderNursing(){
     }else{
       tip='<div class="tip info">尚无记录 · 建议'+season+'季每'+interval+'天一次</div>';
     }
-    return '<div class="check-item mod-teal" onclick="quickNursing(\''+it.key+'\',\''+it.label+'\')"><span class="ci-icon">'+it.icon+'</span><div class="ci-label">'+it.label+'</div><div class="ci-status">'+(last?'上次:'+last.date.slice(5):'未记录')+'</div>'+tip+'</div>';
+    var delBtn = it.custom ? '<button class="ri-del" onclick="event.stopPropagation();delNursingCustom(\''+it.key+'\')" style="position:absolute;right:4px;top:4px;font-size:14px">×</button>' : '';
+    return '<div class="check-item mod-teal" style="position:relative" onclick="quickNursing(\''+it.key+'\',\''+it.label+'\')"><span class="ci-icon">'+it.icon+'</span><div class="ci-label">'+it.label+'</div><div class="ci-status">'+(last?'上次:'+last.date.slice(5):'未记录')+'</div>'+tip+delBtn+'</div>';
   }).join('');
 
-  var filtered=state.filterDate?nursing.filter(function(n){return n.date===state.filterDate;}):nursing.slice(-20).reverse();
+  var filtered = getVisibleRecords('nursing', state.filterDate).slice(0,20);
 
   var historyHtml='';
   filtered.forEach(function(n){
-    var it=null;
-    for(var i=0;i<NURSING_ITEMS.length;i++){ if(NURSING_ITEMS[i].key===n.item){it=NURSING_ITEMS[i];break;} }
-    historyHtml+='<div class="record-item"><span style="font-size:20px">'+(it?it.icon:'🧼')+'</span><div class="ri-main"><div class="ri-content">'+(it?it.label:n.item)+'</div><div class="ri-time">'+n.date+' '+n.time+' · '+(n.member||'')+'</div></div><button class="ri-del" onclick="delNursing(\''+n.id+'\')">×</button></div>';
+    var it = getNursingItemLabel(n.item);
+    var noteStr = n.note ? ' · '+notePreview(n.note) : '';
+    historyHtml+='<div class="record-item" style="cursor:pointer" onclick="showRecordDetail(\'护理详情\', '+JSON.stringify(n).replace(/'/g,"&#39;")+', \'nursing\')"><span style="font-size:20px">'+(it?it.icon:'🧼')+'</span><div class="ri-main"><div class="ri-content">'+(it?it.label:n.item)+noteStr+'</div><div class="ri-time">'+n.date+' '+n.time+' · '+(n.member||'')+'</div></div><button class="ri-del" onclick="event.stopPropagation();delNursing(\''+n.id+'\')">×</button></div>';
   });
   if(!historyHtml) historyHtml='<div class="empty"><span class="icon">🧼</span>暂无记录</div>';
 
   return subHeader('🧼','护理记录')+memberBar()+
-    '<div class="card"><div class="card-title"><span class="left"><span class="icon">🧼</span>护理打卡（'+season+'季建议）</span></div><div style="display:flex;flex-direction:column;gap:8px">'+cards+'</div></div>'+
+    '<div class="card"><div class="card-title"><span class="left"><span class="icon">🧼</span>护理打卡（'+season+'季建议）</span><button class="btn btn-sm btn-teal" onclick="addNursingCustom()">+自定义</button></div><div style="display:flex;flex-direction:column;gap:8px">'+cards+'</div></div>'+
     '<div class="card"><div class="card-title"><span class="left"><span class="icon">📋</span>护理历史</span><input type="date" id="nurseFilter" value="'+state.filterDate+'" onchange="state.filterDate=this.value;renderModule(\'nursing\')" style="width:auto"></div>'+historyHtml+'</div>';
 }
 function initNursing(){}
+
+function addNursingCustom(){
+  openModal('<div class="modal-header"><h3>➕ 自定义护理项</h3><button class="modal-close" onclick="closeModal()">×</button></div>'+
+    '<div class="form-row"><div class="form-group"><label>护理名称</label><input type="text" id="nc_label" placeholder="如：补水、抚触、红臀护理"></div></div>'+
+    '<div class="form-row"><div class="form-group" style="flex:1"><label>图标(emoji)</label><input type="text" id="nc_icon" placeholder="如：💧" value="🧴"></div>'+
+    '<div class="form-group" style="flex:1"><label>建议间隔(天)</label><input type="number" id="nc_interval" value="1" min="1"></div></div>'+
+    '<button class="btn btn-primary btn-block" onclick="saveNursingCustom()">保存</button>');
+}
+
+function saveNursingCustom(){
+  var label=document.getElementById('nc_label').value.trim(); if(!label){toast('请输入名称');return;}
+  var icon=document.getElementById('nc_icon').value.trim()||'🧴';
+  var interval=parseInt(document.getElementById('nc_interval').value)||1;
+  var custom=DB.get('nursingCustom',[]);
+  custom.push({key:'custom_'+Date.now(),icon:icon,label:label,interval:{春:interval,夏:interval,秋:interval,冬:interval},custom:true});
+  DB.set('nursingCustom',custom);
+  closeModal(); toast('已添加✅'); renderModule('nursing');
+}
+
+function delNursingCustom(key){
+  if(!confirm('确认删除该自定义项？')) return;
+  var custom=DB.get('nursingCustom',[]);
+  custom=custom.filter(function(c){return c.key!==key;});
+  DB.set('nursingCustom',custom);
+  toast('已删除'); renderModule('nursing');
+}
 
 function quickNursing(key,label){
   openModal('<div class="modal-header"><h3>🧼 '+label+'记录</h3><button class="modal-close" onclick="closeModal()">×</button></div>'+memberBar()+
@@ -2000,13 +2466,21 @@ function quickNursing(key,label){
 function saveNursing(key){
   var t=document.getElementById('n_time').value; if(!t){toast('请填写时间');return;}
   var d=new Date(t);
-  var rec={id:String(Date.now()),item:key,date:fmtDate(d),time:fmtTime(d),note:document.getElementById('n_note').value,member:state.currentMember};
+  var rec={id:String(Date.now())+'_'+Math.random().toString(36).substr(2,5),item:key,date:fmtDate(d),time:fmtTime(d),note:document.getElementById('n_note').value,member:state.currentMember,_ts:String(Date.now())};
   var nursing=DB.get('nursing',[]); nursing.push(rec); DB.set('nursing',nursing);
   closeModal(); toast('已记录✅'); renderModule('nursing');
 }
 function delNursing(id){
   if(!confirm('确认删除？')) return;
-  var n=DB.get('nursing',[]); n=n.filter(function(x){return x.id!==id;}); DB.set('nursing',n);
+  var n=DB.get('nursing',[]);
+  for(var i=0;i<n.length;i++){
+    if(n[i].id===id){
+      n[i]._deletedAt=new Date().toISOString();
+      n[i]._ts=String(Date.now());
+      break;
+    }
+  }
+  DB.set('nursing',n);
   toast('已删除'); renderModule('nursing');
 }
 
@@ -2018,27 +2492,61 @@ setStatus('护理记录加载完成');
    ==================================================== */
 function renderVaccine(){
   var vac=DB.get('vaccine',{}), ageM=ageMonthsTotal();
+  var order = getVaccineOrder();
+  var vacList = order.map(function(name){
+    for(var i=0; i<VACCINE_LIST.length; i++){
+      if(VACCINE_LIST[i].name === name) return VACCINE_LIST[i];
+    }
+    return null;
+  }).filter(function(v){ return v; });
 
   var html=subHeader('💉','疫苗接种')+memberBar()+
-    '<div class="tip info" style="margin-bottom:10px">📋 以下为0-6岁国家免疫规划疫苗+主流二类疫苗，点击可标记已接种</div>'+
-    '<div class="card"><div class="card-title"><span class="left"><span class="icon">💉</span>疫苗计划表（当前'+ageM+'月龄）</span></div><div class="table-wrap"><table><thead><tr><th>月龄</th><th>疫苗名称</th><th>类型</th><th>状态</th><th>操作</th></tr></thead><tbody>';
+    '<div class="tip info" style="margin-bottom:10px">📋 长按拖拽排序，点击查看详情。支持标记：按时接种/延迟接种/不接种</div>'+
+    '<div class="card"><div class="card-title"><span class="left"><span class="icon">💉</span>疫苗计划表（当前'+ageM+'月龄）</span><button class="btn btn-sm btn-primary" style="background:var(--c-pink-deep);border-radius:20px;width:32px;height:32px;font-size:18px;padding:0" onclick="addCustomVaccine()">+</button></div><div class="table-wrap"><table><thead><tr><th style="width:30px">⇅</th><th>月龄</th><th>疫苗名称</th><th>类型</th><th>状态</th><th>操作</th></tr></thead><tbody>';
 
-  VACCINE_LIST.forEach(function(v){
-    var st=vac[v.name], isNext=v.age>=ageM&&!(st&&st.done);
-    html+='<tr style="'+(isNext?'background:#FEF3C7':'')+'"><td>'+v.ageText+'</td>'+
-      '<td style="white-space:normal;max-width:130px">'+v.name+'<br><span style="font-size:10px;color:#999">'+(v.desc||'')+'</span></td>'+
+  vacList.forEach(function(v, idx){
+    var st=vac[v.name];
+    var isNext = !st && v.age>=ageM;
+    var bg = '';
+    if(st){
+      if(st.status==='done') bg='';
+      else if(st.status==='delayed') bg='background:#FFF3E0';
+      else if(st.status==='skip') bg='background:#F5F5F5';
+    } else if(isNext){
+      bg='background:#FEF3C7';
+    }
+    var statusBadge = '';
+    if(st){
+      if(st.status==='done') statusBadge='<span class="badge badge-done">已接种</span>';
+      else if(st.status==='delayed') statusBadge='<span class="badge" style="background:#FFE0B2;color:#E65100">延迟接种</span>';
+      else if(st.status==='skip') statusBadge='<span class="badge" style="background:#E0E0E0;color:#757575">不接种</span>';
+    } else {
+      statusBadge = isNext ? '<span class="badge badge-pending">待接种</span>' : '<span class="badge badge-pending">未接种</span>';
+    }
+    var reactionPreview = (st&&st.reaction) ? ' · '+notePreview(st.reaction,10) : '';
+    var notePreviewStr = (st&&st.status==='skip'&&st.skipReason) ? ' · '+notePreview(st.skipReason,10) : '';
+    var actionLabel = st ? '编辑' : '标记';
+    html+='<tr data-vac-idx="'+idx+'" style="'+bg+'" ontouchstart="vacRowTouchStart(event,'+idx+')" ontouchmove="vacRowTouchMove(event)" ontouchend="vacRowTouchEnd(event)" onclick="showVaccineDetail(\''+v.name.replace(/'/g,"\\'")+'\')">'+
+      '<td style="cursor:move;font-size:14px;color:#999">⠿</td>'+
+      '<td>'+v.ageText+'</td>'+
+      '<td style="white-space:normal;max-width:110px">'+v.name+'<br><span style="font-size:10px;color:#999">'+(v.desc||'')+'</span></td>'+
       '<td><span class="badge '+(v.type.indexOf('免费')>=0?'badge-free':'badge-paid')+'">'+v.type+'</span></td>'+
-      '<td>'+(st&&st.done?'<span class="badge badge-done">已接种</span>':isNext?'<span class="badge badge-pending">待接种</span>':'<span class="badge badge-pending">未接种</span>')+'</td>'+
-      '<td><button class="btn btn-sm '+(st&&st.done?'btn-ghost':'btn-green')+'" onclick="markVaccine(\''+v.name.replace(/'/g,"\\'")+'\')">'+(st&&st.done?'✓已种':'标记')+'</button></td></tr>';
+      '<td>'+statusBadge+reactionPreview+notePreviewStr+'</td>'+
+      '<td><button class="btn btn-sm '+(st?'btn-ghost':'btn-green')+'" onclick="event.stopPropagation();markVaccine(\''+v.name.replace(/'/g,"\\'")+'\')">'+actionLabel+'</button></td></tr>';
   });
   html+='</tbody></table></div></div>';
 
-  var doneKeys=Object.keys(vac).filter(function(k){return vac[k].done;});
+  /* 已处理记录（按时+延迟+不接种）按日期倒序 */
+  var doneKeys=Object.keys(vac).filter(function(k){return vac[k] && (vac[k].status==='done'||vac[k].status==='delayed'||vac[k].status==='skip');});
   if(doneKeys.length){
-    html+='<div class="card"><div class="card-title"><span class="left"><span class="icon">📝</span>已接种记录&不良反应</span></div>';
+    doneKeys.sort(function(a,b){ return (vac[b].date||'').localeCompare(vac[a].date||''); });
+    html+='<div class="card"><div class="card-title"><span class="left"><span class="icon">📝</span>疫苗记录</span></div>';
     doneKeys.forEach(function(k){
       var v=vac[k];
-      html+='<div class="record-item"><div class="ri-main"><div class="ri-content">'+k+'</div><div class="ri-time">接种:'+v.date+' · '+(v.member||'')+'</div>'+(v.reaction?'<div class="tip warn" style="margin-top:4px">⚠️ 反应：'+v.reaction+'</div>':'')+'</div><button class="btn btn-sm btn-ghost" onclick="editVaccine(\''+k.replace(/'/g,"\\'")+'\')">编辑</button></div>';
+      var statusIcon = v.status==='done'?'✅':v.status==='delayed'?'⏰':'⏭️';
+      var statusText = v.status==='done'?'已接种':v.status==='delayed'?'延迟接种':'不接种';
+      var detail = v.status==='skip' ? (v.skipReason||'未填写原因') : (v.reaction||'无不良反应');
+      html+='<div class="record-item" style="cursor:pointer" onclick="showVaccineDetail(\''+k.replace(/'/g,"\\'")+'\')"><div class="ri-main"><div class="ri-content">'+statusIcon+' '+k+'</div><div class="ri-time">'+statusText+' · '+(v.date||'')+' · '+(v.member||'')+'</div><div class="ri-time" style="color:#999">备注: '+notePreview(detail,15)+'</div></div><button class="btn btn-sm btn-ghost" onclick="event.stopPropagation();editVaccine(\''+k.replace(/'/g,"\\'")+'\')">编辑</button></div>';
     });
     html+='</div>';
   }
@@ -2046,32 +2554,126 @@ function renderVaccine(){
 }
 function initVaccine(){}
 
+/* 新增自定义疫苗 */
+function addCustomVaccine(){
+  openModal('<div class="modal-header"><h3>➕ 新增疫苗</h3><button class="modal-close" onclick="closeModal()">×</button></div>'+
+    '<div class="form-row"><div class="form-group" style="flex:2"><label>疫苗名称</label><input type="text" id="cv_name" placeholder="如：轮状病毒疫苗"></div></div>'+
+    '<div class="form-row"><div class="form-group" style="flex:1"><label>建议月龄</label><input type="text" id="cv_age" placeholder="如：6月龄" value="'+ageMonthsTotal()+'月龄"></div>'+
+    '<div class="form-group" style="flex:1"><label>类型</label><select id="cv_type"><option value="自费">自费</option><option value="免费">免费</option></select></div></div>'+
+    '<div class="form-row"><div class="form-group" style="flex:2"><label>说明(选填)</label><input type="text" id="cv_desc" placeholder="如：预防轮状病毒腹泻"></div></div>'+
+    '<button class="btn btn-primary btn-block" onclick="saveCustomVaccine()">添加</button>');
+}
+
+function saveCustomVaccine(){
+  var name=document.getElementById('cv_name').value.trim();
+  if(!name){toast('请输入疫苗名称');return;}
+  var ageText=document.getElementById('cv_age').value.trim()||'自定义';
+  var type=document.getElementById('cv_type').value;
+  var desc=document.getElementById('cv_desc').value.trim();
+  /* 添加到VACCINE_LIST和排序 */
+  VACCINE_LIST.push({age:999,ageText:ageText,name:name,type:type,desc:desc,precaution:'',custom:true});
+  var order=getVaccineOrder();
+  order.push(name);
+  saveVaccineOrder(order);
+  closeModal(); toast('已添加✅'); renderModule('vaccine');
+}
+
+function showVaccineDetail(name){
+  var vac=DB.get('vaccine',{}), v=vac[name];
+  var vacInfo = null;
+  for(var i=0; i<VACCINE_LIST.length; i++){
+    if(VACCINE_LIST[i].name === name){ vacInfo = VACCINE_LIST[i]; break; }
+  }
+  var html='<div class="modal-header"><h3>💉 疫苗详情</h3><button class="modal-close" onclick="closeModal()">×</button></div>';
+  html+='<div style="padding:12px">';
+  html+='<div style="font-weight:700;font-size:16px;margin-bottom:10px">'+name+'</div>';
+  if(vacInfo){
+    html+='<div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #F0E8E4"><span style="color:var(--text-sub)">建议月龄</span><span>'+vacInfo.ageText+'</span></div>';
+    html+='<div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #F0E8E4"><span style="color:var(--text-sub)">类型</span><span>'+(vacInfo.type||'')+'</span></div>';
+    if(vacInfo.desc) html+='<div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #F0E8E4"><span style="color:var(--text-sub)">说明</span><span style="text-align:right">'+vacInfo.desc+'</span></div>';
+    if(vacInfo.precaution){
+      html+='<div style="padding:8px 0;border-bottom:1px solid #F0E8E4"><div style="color:var(--text-sub);font-size:12px;margin-bottom:6px">📋 接种注意事项</div><div style="background:#FEF3C7;padding:10px;border-radius:8px;font-size:13px;line-height:1.6">'+vacInfo.precaution+'</div></div>';
+    }
+  }
+  if(v){
+    var statusText = v.status==='done'?'按时接种':v.status==='delayed'?'延迟接种':'不接种';
+    html+='<div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #F0E8E4"><span style="color:var(--text-sub)">状态</span><span style="font-weight:600">'+statusText+'</span></div>';
+    if(v.date) html+='<div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #F0E8E4"><span style="color:var(--text-sub)">日期</span><span>'+v.date+'</span></div>';
+    html+='<div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #F0E8E4"><span style="color:var(--text-sub)">记录人</span><span>'+(v.member||'')+'</span></div>';
+    if(v.status==='skip' && v.skipReason){
+      html+='<div style="padding:8px 0;border-bottom:1px solid #F0E8E4"><div style="color:var(--text-sub);font-size:12px;margin-bottom:6px">不接种原因</div><div style="background:#F5F5F5;padding:10px;border-radius:8px;font-size:13px;line-height:1.6">'+v.skipReason+'</div></div>';
+    }
+    if(v.reaction){
+      html+='<div style="padding:8px 0;border-bottom:1px solid #F0E8E4"><div style="color:var(--text-sub);font-size:12px;margin-bottom:6px">不良反应/备注</div><div style="background:#FEF3C7;padding:10px;border-radius:8px;font-size:13px;line-height:1.6">'+v.reaction+'</div></div>';
+    }
+    html+='<button class="btn btn-primary btn-block" style="margin-top:10px" onclick="editVaccine(\''+name.replace(/'/g,"\\'")+'\')">编辑</button>';
+  } else {
+    html+='<div class="tip info" style="margin:10px 0">尚未处理此疫苗</div>';
+    html+='<button class="btn btn-green btn-block" onclick="closeModal();markVaccine(\''+name.replace(/'/g,"\\'")+'\')">标记接种</button>';
+  }
+  html+='</div>';
+  openModal(html);
+}
+
 function markVaccine(name){
   var vac=DB.get('vaccine',{});
-  if(vac[name]&&vac[name].done){
-    if(!confirm('取消'+name+'的接种标记？')) return;
+  var existing = vac[name];
+  /* 如果已处理，点击取消 */
+  if(existing && (existing.status==='done'||existing.status==='delayed'||existing.status==='skip')){
+    if(!confirm('取消'+name+'的记录？')) return;
     delete vac[name]; DB.set('vaccine',vac); toast('已取消'); renderModule('vaccine'); return;
   }
-  openModal('<div class="modal-header"><h3>💉 标记接种</h3><button class="modal-close" onclick="closeModal()">×</button></div>'+
+  /* 弹窗：选择状态 */
+  openModal('<div class="modal-header"><h3>💉 '+name+'</h3><button class="modal-close" onclick="closeModal()">×</button></div>'+
+    '<div style="padding:12px">'+
+    '<div style="display:flex;flex-direction:column;gap:10px">'+
+    '<button class="btn btn-green btn-block" style="padding:14px" onclick="showVaccineForm(\''+name.replace(/'/g,"\\'")+'\',\'done\')">✅ 按时接种</button>'+
+    '<button class="btn btn-block" style="padding:14px;background:#FFE0B2;color:#E65100" onclick="showVaccineForm(\''+name.replace(/'/g,"\\'")+'\',\'delayed\')">⏰ 延迟接种</button>'+
+    '<button class="btn btn-block" style="padding:14px;background:#E0E0E0;color:#616161" onclick="showVaccineForm(\''+name.replace(/'/g,"\\'")+'\',\'skip\')">⏭️ 不接种</button>'+
+    '</div></div>');
+}
+
+function showVaccineForm(name, status){
+  var vac=DB.get('vaccine',{}), v=vac[name]||{};
+  var title = status==='done'?'按时接种':status==='delayed'?'延迟接种':'不接种';
+  var dateField = status==='skip' ? '' :
+    '<div class="form-row"><div class="form-group"><label>'+(status==='delayed'?'实际接种':'接种')+'日期</label><input type="date" id="v_date" value="'+(v.date||todayStr())+'"></div></div>';
+  var reactionField = status==='skip' ? '' :
+    '<div class="form-row"><div class="form-group" style="flex:2"><label>不良反应/备注(选填)</label><textarea id="v_reaction" placeholder="如：低烧38度、局部红肿">'+(v.reaction||'')+'</textarea></div></div>';
+  var skipField = status==='skip' ?
+    '<div class="form-row"><div class="form-group" style="flex:2"><label>不接种原因</label><textarea id="v_skipReason" placeholder="如：宝宝发烧暂缓、已接种其他品牌、家长选择不接种">'+(v.skipReason||'')+'</textarea></div></div>' : '';
+  
+  openModal('<div class="modal-header"><h3>💉 '+title+'</h3><button class="modal-close" onclick="closeModal()">×</button></div>'+
     '<div style="font-size:14px;font-weight:600;margin-bottom:10px">'+name+'</div>'+memberBar()+
-    '<div class="form-row"><div class="form-group"><label>接种日期</label><input type="date" id="v_date" value="'+todayStr()+'"></div></div>'+
-    '<div class="form-row"><div class="form-group" style="flex:2"><label>不良反应记录(选填)</label><textarea id="v_reaction" placeholder="如：低烧38度、局部红肿、哭闹等"></textarea></div></div>'+
-    '<button class="btn btn-primary btn-block" onclick="saveVaccine(\''+name.replace(/'/g,"\\'")+'\')">确认接种</button>');
+    dateField+reactionField+skipField+
+    '<button class="btn btn-primary btn-block" onclick="saveVaccineStatus(\''+name.replace(/'/g,"\\'")+'\',\''+status+'\')">确认'+title+'</button>');
   renderMemberChips();
 }
-function saveVaccine(name){
+
+function saveVaccineStatus(name, status){
   var vac=DB.get('vaccine',{});
-  vac[name]={done:true,date:document.getElementById('v_date').value,reaction:document.getElementById('v_reaction').value,member:state.currentMember};
-  DB.set('vaccine',vac); closeModal(); toast('已标记接种✅'); renderModule('vaccine');
+  var rec = {status:status, member:state.currentMember, _ts:String(Date.now())};
+  if(status !== 'skip'){
+    rec.date = document.getElementById('v_date').value;
+    rec.reaction = document.getElementById('v_reaction').value;
+  } else {
+    rec.skipReason = document.getElementById('v_skipReason').value;
+    rec.date = todayStr();
+  }
+  vac[name] = rec;
+  DB.set('vaccine',vac); closeModal(); toast('已记录✅'); renderModule('vaccine');
 }
+
+/* 兼容旧版saveVaccine */
+function saveVaccine(name){
+  saveVaccineStatus(name, 'done');
+}
+
 function editVaccine(name){
-  var vac=DB.get('vaccine',{}), v=vac[name]; if(!v) return;
-  openModal('<div class="modal-header"><h3>编辑接种记录</h3><button class="modal-close" onclick="closeModal()">×</button></div>'+
-    '<div style="font-size:14px;font-weight:600;margin-bottom:10px">'+name+'</div>'+memberBar()+
-    '<div class="form-row"><div class="form-group"><label>接种日期</label><input type="date" id="v_date" value="'+v.date+'"></div></div>'+
-    '<div class="form-row"><div class="form-group" style="flex:2"><label>不良反应</label><textarea id="v_reaction">'+(v.reaction||'')+'</textarea></div></div>'+
-    '<button class="btn btn-primary btn-block" onclick="saveVaccine(\''+name.replace(/'/g,"\\'")+'\')">更新</button>');
-  renderMemberChips();
+  var vac=DB.get('vaccine',{}), v=vac[name];
+  if(!v) { markVaccine(name); return; }
+  /* 根据已有状态显示对应编辑表单 */
+  showVaccineForm(name, v.status||'done');
 }
 
 setStatus('疫苗接种加载完成');
@@ -2080,6 +2682,8 @@ setStatus('疫苗接种加载完成');
 /* ====================================================
    早教
    ==================================================== */
+
+/* 月龄段早教方案（保留原数据，用于自动生成打卡清单） */
 var EARLY_EDU_BLOCKS = [
   {range:[0,2],title:'0-2月',bigMotor:'俯卧抬头练习、被动操',fineMotor:'抓握反射训练（摇铃）',logic:'黑白卡追视',music:'轻柔摇篮曲、白噪音',lang:'多与宝宝说话、模仿发音'},
   {range:[2,4],title:'2-4月',bigMotor:'翻身练习、竖抱抬头',fineMotor:'抓握玩具、手摇铃',logic:'彩色卡追视、摇铃寻声',music:'不同节奏音乐律动',lang:'回应宝宝咿呀声、讲故事'},
@@ -2093,41 +2697,309 @@ var EARLY_EDU_BLOCKS = [
   {range:[24,30],title:'2-2.5岁',bigMotor:'单脚站、骑三轮车',fineMotor:'画圆、剪刀剪',logic:'数1-5、简单迷宫',music:'哼唱整首歌',lang:'3-4字短句、问答'},
   {range:[30,36],title:'2.5-3岁',bigMotor:'单脚跳、平衡木',fineMotor:'画十字、折纸',logic:'数1-10、找不同',music:'识别旋律',lang:'完整句子、背儿歌'}
 ];
+
+/* 默认早教打卡项（按月龄段生成内容） */
+var EARLY_EDU_ITEMS_DEFAULT = [
+  {key:'bigMotor',icon:'🏃',label:'大运动',category:'大运动'},
+  {key:'fineMotor',icon:'✋',label:'精细动作',category:'精细动作'},
+  {key:'logic',icon:'🧩',label:'逻辑思维',category:'认知启蒙'},
+  {key:'music',icon:'🎵',label:'音乐启蒙',category:'艺术启蒙'},
+  {key:'lang',icon:'🗣️',label:'语言启蒙',category:'语言启蒙'}
+];
+
 function getEarlyEduBlock(){
   var m=ageMonthsTotal();
   for(var i=0;i<EARLY_EDU_BLOCKS.length;i++){ if(m>=EARLY_EDU_BLOCKS[i].range[0]&&m<EARLY_EDU_BLOCKS[i].range[1]) return EARLY_EDU_BLOCKS[i]; }
   return EARLY_EDU_BLOCKS[EARLY_EDU_BLOCKS.length-1];
 }
 
-function renderEarlyEdu(){
-  var m=ageMonthsTotal(), cur=getEarlyEduBlock(), edu=DB.get('earlyedu',{});
-  var items=[
-    {key:'bigMotor',icon:'🏃',label:'大运动游戏',val:cur.bigMotor,color:'mod-pink'},
-    {key:'fineMotor',icon:'✋',label:'精细动作',val:cur.fineMotor,color:'mod-blue'},
-    {key:'logic',icon:'🧩',label:'逻辑思维',val:cur.logic,color:'mod-green'},
-    {key:'music',icon:'🎵',label:'音乐启蒙',val:cur.music,color:'mod-purple'},
-    {key:'lang',icon:'🗣',label:'语言启蒙',val:cur.lang,color:'mod-yellow'}
-  ];
+/* 获取所有早教打卡项（默认+自定义） */
+function getEarlyEduItems(){
+  var custom = DB.get('earlyeduCustom', []);
+  return EARLY_EDU_ITEMS_DEFAULT.concat(custom);
+}
 
-  var html=subHeader('🧠','早教')+memberBar()+
-    '<div class="card" style="background:linear-gradient(135deg,var(--c-purple-light),#fff)"><div style="text-align:center;padding:6px 0"><div style="font-size:36px">🧠</div>'+
+/* 获取某项在当前月龄的内容描述 */
+function getEarlyEduItemContent(key){
+  var block = getEarlyEduBlock();
+  if(block[key]) return block[key];
+  return '';
+}
+
+/* 获取今日已打卡的早教项key列表 */
+function getTodayEduDoneKeys(){
+  var edu = DB.get('earlyedu', []);
+  var today = todayStr();
+  var doneKeys = {};
+  edu.forEach(function(r){
+    if(r.date === today && !r._deletedAt) doneKeys[r.item] = true;
+  });
+  return doneKeys;
+}
+
+/* 计算连续打卡天数 */
+function getEduStreakDays(){
+  var edu = DB.get('earlyedu', []);
+  var dateSet = {};
+  edu.forEach(function(r){
+    if(!r._deletedAt && r.date) dateSet[r.date] = true;
+  });
+  var streak = 0;
+  var d = new Date();
+  while(true){
+    var ds = fmtDate(d);
+    if(dateSet[ds]){
+      streak++;
+      d.setDate(d.getDate() - 1);
+    } else {
+      break;
+    }
+  }
+  return streak;
+}
+
+/* 获取最近N天的打卡情况（用于日历展示） */
+function getEduCalendarData(days){
+  var edu = DB.get('earlyedu', []);
+  var result = [];
+  var today = todayStr();
+  var d = new Date();
+  for(var i = days - 1; i >= 0; i--){
+    var checkDate = new Date(d);
+    checkDate.setDate(checkDate.getDate() - i);
+    var ds = fmtDate(checkDate);
+    var count = 0;
+    edu.forEach(function(r){
+      if(r.date === ds && !r._deletedAt) count++;
+    });
+    var isToday = (ds === today);
+    var weekday = ['日','一','二','三','四','五','六'][checkDate.getDay()];
+    result.push({date:ds, day:checkDate.getDate(), count:count, isToday:isToday, weekday:weekday, fullDate:ds});
+  }
+  return result;
+}
+
+function renderEarlyEdu(){
+  var m = ageMonthsTotal();
+  var cur = getEarlyEduBlock();
+  var items = getEarlyEduItems();
+  var todayDone = getTodayEduDoneKeys();
+  var streak = getEduStreakDays();
+  var todayCount = 0;
+  for(var k in todayDone) { if(todayDone.hasOwnProperty(k)) todayCount++; }
+
+  /* 月龄信息卡 */
+  var html = subHeader('🧠','早教') + memberBar() +
+    '<div class="card" style="background:linear-gradient(135deg,var(--c-purple-light),#fff)"><div style="text-align:center;padding:6px 0">'+
+    '<div style="font-size:36px">🧠</div>'+
     '<div style="font-size:16px;font-weight:700;margin:4px 0">当前月龄：'+m+'月</div>'+
     '<div class="tip info" style="display:inline-block">适配方案：'+cur.title+'阶段 · 内容随月龄自动更新</div></div></div>';
 
-  items.forEach(function(it){
-    var done=edu[it.key]&&edu[it.key].done;
-    html+='<div class="card"><div class="card-title"><span class="left"><span class="icon">'+it.icon+'</span>'+it.label+'</span>'+
+  /* 连续打卡 + 日历 */
+  var calData = getEduCalendarData(14);
+  var calCells = calData.map(function(c){
+    var bg = c.count > 0 ? 'var(--c-green-deep)' : '#E5E5E5';
+    var color = c.count > 0 ? '#fff' : '#999';
+    var border = c.isToday ? '2px solid var(--c-pink-deep)' : '2px solid transparent';
+    return '<div style="text-align:center;flex:1" onclick="showEduDayDetail(\''+c.fullDate+'\')">'+
+      '<div style="font-size:10px;color:var(--text-sub);margin-bottom:2px">'+c.weekday+'</div>'+
+      '<div style="width:28px;height:28px;border-radius:50%;background:'+bg+';color:'+color+';display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;margin:0 auto;border:'+border+'">'+c.day+'</div>'+
+      '<div style="font-size:9px;color:'+(c.count>0?'var(--c-green-deep)':'#ccc')+';margin-top:2px">'+(c.count>0?c.count+'项':'-')+'</div>'+
+      '</div>';
+  }).join('');
+
+  html += '<div class="card"><div class="card-title"><span class="left"><span class="icon">🔥</span>连续打卡</span>'+
+    '<span style="font-size:13px;color:var(--c-pink-deep);font-weight:700">'+streak+'天</span></div>'+
+    '<div style="display:flex;overflow-x:auto;gap:2px;padding:4px 0">'+calCells+'</div>'+
+    '<div style="text-align:center;margin-top:8px;font-size:12px;color:var(--text-sub)">今日已打卡 '+todayCount+'/'+items.length+' 项</div></div>';
+
+  /* 每日打卡清单 */
+  var cards = items.map(function(it){
+    var done = todayDone[it.key];
+    var content = getEarlyEduItemContent(it.key);
+    var delBtn = it.custom ? '<button class="ri-del" onclick="event.stopPropagation();delEduCustom(\''+it.key+'\')" style="position:absolute;right:4px;top:4px;font-size:14px">×</button>' : '';
+    var contentHtml = content ? '<div style="text-align:left;width:100%;font-size:13px;line-height:1.6;color:var(--text-sub);margin-top:4px">'+content+'</div>' : '';
+    return '<div class="card" style="position:relative">'+
+      '<div class="card-title"><span class="left"><span class="icon">'+it.icon+'</span>'+it.label+(it.custom?' <span style="font-size:10px;color:var(--c-pink-deep)">自定义</span>':'')+'</span>'+
       '<button class="btn btn-sm '+(done?'btn-green':'btn-ghost')+'" onclick="toggleEdu(\''+it.key+'\')">'+(done?'✅已完成':'打卡')+'</button></div>'+
-      '<div class="check-item '+it.color+'" style="cursor:default"><div style="text-align:left;width:100%;font-size:13px;line-height:1.6">'+it.val+'</div></div></div>';
+      contentHtml + delBtn + '</div>';
+  }).join('');
+
+  html += '<div class="card"><div class="card-title"><span class="left"><span class="icon">📋</span>每日打卡清单</span>'+
+    '<button class="btn btn-sm btn-purple" onclick="addEduCustom()">+自定义</button></div>'+
+    '<div style="font-size:12px;color:var(--text-sub);margin-bottom:8px">点击"打卡"完成今日训练，可添加备注</div></div>'+
+    cards;
+
+  /* 历史记录（倒序） */
+  var filtered = getVisibleRecords('earlyedu', state.filterDate).slice(0, 30);
+  var historyHtml = '';
+  filtered.forEach(function(r){
+    var it = null;
+    for(var i=0; i<items.length; i++){ if(items[i].key === r.item){ it = items[i]; break; } }
+    var noteStr = r.note ? ' · '+notePreview(r.note) : '';
+    historyHtml += '<div class="record-item" style="cursor:pointer" onclick="showRecordDetail(\'早教详情\', '+JSON.stringify(r).replace(/'/g,"&#39;")+', \'earlyedu\')">'+
+      '<span style="font-size:20px">'+(it?it.icon:'🧠')+'</span>'+
+      '<div class="ri-main"><div class="ri-content">'+(it?it.label:r.item)+noteStr+'</div>'+
+      '<div class="ri-time">'+r.date+' '+(r.time||'')+' · '+(r.member||'')+'</div></div>'+
+      '<button class="ri-del" onclick="event.stopPropagation();delEdu(\''+r.id+'\')">×</button></div>';
   });
+  if(!historyHtml) historyHtml = '<div class="empty"><span class="icon">🧠</span>暂无早教记录</div>';
+
+  html += '<div class="card"><div class="card-title"><span class="left"><span class="icon">📜</span>历史记录</span>'+
+    '<input type="date" id="eduFilter" value="'+state.filterDate+'" onchange="state.filterDate=this.value;renderModule(\'earlyedu\')" style="width:auto"></div>'+
+    historyHtml + '</div>';
+
   return html;
 }
+
 function initEarlyEdu(){}
+
+/* 打卡/取消打卡 */
 function toggleEdu(key){
-  var edu=DB.get('earlyedu',{});
-  if(edu[key]&&edu[key].done){ delete edu[key]; }
-  else{ edu[key]={done:true,date:todayStr(),member:state.currentMember}; }
-  DB.set('earlyedu',edu); toast(edu[key]?'已打卡✅':'已取消'); renderModule('earlyedu');
+  var edu = DB.get('earlyedu', []);
+  var today = todayStr();
+  /* 检查今日是否已打卡此项 */
+  var existIdx = -1;
+  for(var i=0; i<edu.length; i++){
+    if(edu[i].item === key && edu[i].date === today && !edu[i]._deletedAt){ existIdx = i; break; }
+  }
+  if(existIdx >= 0){
+    /* 已打卡 → 取消 */
+    if(!confirm('取消今日此项打卡？')) return;
+    edu[existIdx]._deletedAt = new Date().toISOString();
+    edu[existIdx]._ts = String(Date.now());
+    DB.set('earlyedu', edu);
+    toast('已取消'); renderModule('earlyedu'); return;
+  }
+  /* 未打卡 → 弹窗填写备注 */
+  openEduCheckModal(key);
+}
+
+function openEduCheckModal(key){
+  var items = getEarlyEduItems();
+  var it = null;
+  for(var i=0; i<items.length; i++){ if(items[i].key === key){ it = items[i]; break; } }
+  var label = it ? it.label : key;
+  var icon = it ? it.icon : '🧠';
+  var content = getEarlyEduItemContent(key);
+  var contentTip = content ? '<div class="tip info" style="margin-bottom:10px">📌 本月龄建议：'+content+'</div>' : '';
+  openModal('<div class="modal-header"><h3>'+icon+' '+label+'打卡</h3><button class="modal-close" onclick="closeModal()">×</button></div>'+
+    memberBar() + contentTip +
+    '<div class="form-row"><div class="form-group"><label>时间</label><input type="datetime-local" id="ee_time" value="'+nowDT()+'"></div></div>'+
+    '<div class="form-row"><div class="form-group" style="flex:2"><label>训练备注(选填)</label><textarea id="ee_note" placeholder="如：今天练习了10分钟，宝宝很喜欢追视卡片"></textarea></div></div>'+
+    '<button class="btn btn-primary btn-block" onclick="saveEdu(\''+key+'\')">✅ 确认打卡</button>');
+  renderMemberChips();
+}
+
+function saveEdu(key){
+  var t = document.getElementById('ee_time').value;
+  if(!t){ toast('请填写时间'); return; }
+  var d = new Date(t);
+  var rec = {
+    id: String(Date.now())+'_'+Math.random().toString(36).substr(2,5),
+    item: key,
+    date: fmtDate(d),
+    time: fmtTime(d),
+    note: document.getElementById('ee_note').value,
+    member: state.currentMember,
+    _ts: String(Date.now())
+  };
+  var edu = DB.get('earlyedu', []);
+  edu.push(rec);
+  DB.set('earlyedu', edu);
+  closeModal(); toast('已打卡✅'); renderModule('earlyedu');
+}
+
+function delEdu(id){
+  if(!confirm('确认删除？')) return;
+  var edu = DB.get('earlyedu', []);
+  for(var i=0; i<edu.length; i++){
+    if(edu[i].id === id){
+      edu[i]._deletedAt = new Date().toISOString();
+      edu[i]._ts = String(Date.now());
+      break;
+    }
+  }
+  DB.set('earlyedu', edu);
+  toast('已删除'); renderModule('earlyedu');
+}
+
+/* 自定义早教项 */
+function addEduCustom(){
+  openModal('<div class="modal-header"><h3>➕ 自定义早教项</h3><button class="modal-close" onclick="closeModal()">×</button></div>'+
+    '<div class="form-row"><div class="form-group"><label>项目名称</label><input type="text" id="ee_label" placeholder="如：感统训练、户外探索"></div></div>'+
+    '<div class="form-row"><div class="form-group" style="flex:1"><label>图标(emoji)</label><input type="text" id="ee_icon" placeholder="如：🎨" value="🎯"></div>'+
+    '<div class="form-group" style="flex:1"><label>分类</label><input type="text" id="ee_category" placeholder="如：综合训练" value="自定义"></div></div>'+
+    '<div class="form-row"><div class="form-group" style="flex:2"><label>训练内容(选填)</label><textarea id="ee_content" placeholder="如：每天进行15分钟感官刺激训练"></textarea></div></div>'+
+    '<button class="btn btn-primary btn-block" onclick="saveEduCustom()">保存</button>');
+}
+
+function saveEduCustom(){
+  var label = document.getElementById('ee_label').value.trim();
+  if(!label){ toast('请输入名称'); return; }
+  var icon = document.getElementById('ee_icon').value.trim() || '🎯';
+  var category = document.getElementById('ee_category').value.trim() || '自定义';
+  var content = document.getElementById('ee_content').value.trim();
+  var custom = DB.get('earlyeduCustom', []);
+  custom.push({
+    key: 'custom_'+Date.now(),
+    icon: icon,
+    label: label,
+    category: category,
+    content: content,
+    custom: true
+  });
+  DB.set('earlyeduCustom', custom);
+  closeModal(); toast('已添加✅'); renderModule('earlyedu');
+}
+
+function delEduCustom(key){
+  if(!confirm('确认删除该自定义项？')) return;
+  var custom = DB.get('earlyeduCustom', []);
+  custom = custom.filter(function(c){ return c.key !== key; });
+  DB.set('earlyeduCustom', custom);
+  toast('已删除'); renderModule('earlyedu');
+}
+
+/* 查看某天打卡详情 */
+function showEduDayDetail(dateStr){
+  var edu = DB.get('earlyedu', []);
+  var items = getEarlyEduItems();
+  var dayRecords = edu.filter(function(r){ return r.date === dateStr && !r._deletedAt; });
+  if(dayRecords.length === 0){
+    toast(dateStr.slice(5) + ' 无打卡记录');
+    return;
+  }
+  var html = '<div class="modal-header"><h3>🧠 '+dateStr.slice(5)+' 早教记录</h3><button class="modal-close" onclick="closeModal()">×</button></div>';
+  html += '<div style="padding:12px">';
+  dayRecords.forEach(function(r){
+    var it = null;
+    for(var i=0; i<items.length; i++){ if(items[i].key === r.item){ it = items[i]; break; } }
+    html += '<div class="record-item" style="cursor:pointer" onclick="showRecordDetail(\'早教详情\', '+JSON.stringify(r).replace(/'/g,"&#39;")+', \'earlyedu\')">'+
+      '<span style="font-size:20px">'+(it?it.icon:'🧠')+'</span>'+
+      '<div class="ri-main"><div class="ri-content">'+(it?it.label:r.item)+'</div>'+
+      '<div class="ri-time">'+(r.time||'')+' · '+(r.member||'')+(r.note?' · '+notePreview(r.note):'')+'</div></div></div>';
+  });
+  html += '</div>';
+  openModal(html);
+}
+
+/* 获取首页早教今日待办 */
+function getEarlyEduTodos(){
+  var items = getEarlyEduItems();
+  var todayDone = getTodayEduDoneKeys();
+  var todos = [];
+  items.forEach(function(it){
+    if(!todayDone[it.key]){
+      todos.push({
+        key: it.key,
+        icon: it.icon,
+        label: it.label,
+        content: getEarlyEduItemContent(it.key)
+      });
+    }
+  });
+  return todos;
 }
 
 setStatus('早教加载完成');
@@ -2138,25 +3010,25 @@ setStatus('早教加载完成');
    ==================================================== */
 var FOOD_RECIPES = {
   6:{stage:'6月龄·初期辅食',texture:'泥糊状',items:[
-    {name:'强化铁米粉',desc:'首次添加首选，温水冲调成糊',allergen:false},
-    {name:'南瓜泥',desc:'蒸熟打泥，温和易消化',allergen:false},
-    {name:'胡萝卜泥',desc:'蒸熟打泥，富含胡萝卜素',allergen:false},
-    {name:'苹果泥',desc:'蒸熟或生刮泥',allergen:false},
-    {name:'土豆泥',desc:'蒸熟打泥',allergen:false}
+    {name:'强化铁米粉',desc:'首次添加首选，温水冲调成糊',allergen:false,nutrition:'富含铁、锌、B族维生素',portion:'5-10g',steps:['取1勺婴儿米粉放入碗中','加入约30ml温水(40度左右)','同一方向搅拌至无颗粒的稀糊状','初次尝试给1-2勺，观察3天过敏反应'],taboo:'冲调水温不超过60度，避免破坏营养成分'},
+    {name:'南瓜泥',desc:'蒸熟打泥，温和易消化',allergen:false,nutrition:'富含胡萝卜素、膳食纤维',portion:'20-30g',steps:['南瓜去皮去籽，切小块','上锅蒸15-20分钟至软烂','放入辅食机加少量温水打泥','过筛使口感更细腻','初次给1-2勺，逐日增量'],taboo:'不宜与羊肉同食'},
+    {name:'胡萝卜泥',desc:'蒸熟打泥，富含胡萝卜素',allergen:false,nutrition:'富含维生素A、胡萝卜素',portion:'20-30g',steps:['胡萝卜去皮切薄片','蒸15分钟至软','加少量温水打泥','滴2滴橄榄油促进吸收'],taboo:'不宜与白萝卜同食'},
+    {name:'苹果泥',desc:'蒸熟或生刮泥',allergen:false,nutrition:'富含果胶、维生素C',portion:'15-20g',steps:['苹果洗净去皮去核','蒸熟（更易消化）或用不锈钢勺刮泥','初次少量给1小勺'],taboo:'空腹不宜食用，避免果酸刺激胃'},
+    {name:'土豆泥',desc:'蒸熟打泥',allergen:false,nutrition:'富含淀粉、钾',portion:'20-30g',steps:['土豆去皮切小块','蒸20分钟至软烂','加少量温水压成泥','可加母乳/配方奶调稀'],taboo:'发芽土豆禁用'}
   ]},
   9:{stage:'9-11月龄·手指食物',texture:'小颗粒/手指条',items:[
-    {name:'蛋黄',desc:'从1/4开始逐渐增加',allergen:true},
-    {name:'鱼肉泥',desc:'去刺，鳕鱼/三文鱼',allergen:true},
-    {name:'豆腐',desc:'嫩豆腐，高钙',allergen:true},
-    {name:'软烂面条',desc:'碎短面',allergen:true},
-    {name:'手指胡萝卜条',desc:'蒸软，锻炼抓握',allergen:false}
+    {name:'蛋黄',desc:'从1/4开始逐渐增加',allergen:true,nutrition:'富含蛋白质、卵磷脂、铁',portion:'1/4-1/2个',steps:['鸡蛋煮熟','取蛋黄','从1/4开始，压碎加温水/奶调糊','逐周增加到半个再到整个'],taboo:'首次尝试后观察3天有无过敏'},
+    {name:'鱼肉泥',desc:'去刺，鳕鱼/三文鱼',allergen:true,nutrition:'富含DHA、优质蛋白',portion:'15-20g',steps:['鱼去刺去皮切小块','蒸8-10分钟','压成泥，检查无刺','可拌入米粉中'],taboo:'确认无刺，首次少量尝试'},
+    {name:'豆腐',desc:'嫩豆腐，高钙',allergen:true,nutrition:'富含植物蛋白、钙',portion:'20g',steps:['嫩豆腐切小块','焯水1分钟去豆腥','压碎或切小丁'],taboo:'不宜与菠菜同食'},
+    {name:'软烂面条',desc:'碎短面',allergen:true,nutrition:'富含碳水化合物',portion:'15-20g',steps:['宝宝碎面条折短','煮烂至软','可加蔬菜泥拌匀'],taboo:'初次少量，观察麦麸过敏'},
+    {name:'手指胡萝卜条',desc:'蒸软，锻炼抓握',allergen:false,nutrition:'富含胡萝卜素',portion:'2-3根',steps:['胡萝卜切长条（食指大小）','蒸15分钟至能用手指捏碎','放凉后让宝宝自己拿着吃'],taboo:'确保软烂，防止噎住'}
   ]},
   12:{stage:'12月+·过渡辅食',texture:'小块状',items:[
-    {name:'全蛋',desc:'蒸蛋羹',allergen:true},
-    {name:'软饭',desc:'正常米饭偏软',allergen:false},
-    {name:'小馄饨',desc:'儿童尺寸',allergen:true},
-    {name:'酸奶',desc:'无糖原味',allergen:true},
-    {name:'三文鱼块',desc:'煎/蒸',allergen:true}
+    {name:'全蛋',desc:'蒸蛋羹',allergen:true,nutrition:'富含蛋白质、卵磷脂',portion:'1个',steps:['鸡蛋打散','加1.5倍温水搅匀','过筛去泡','蒸10-12分钟，焖2分钟'],taboo:'1岁前不建议蛋白，1岁后逐步尝试'},
+    {name:'软饭',desc:'正常米饭偏软',allergen:false,nutrition:'富含碳水化合物',portion:'30-50g',steps:['米水比1:1.5','正常煮饭模式','比成人饭稍软烂'],taboo:'不宜过硬'},
+    {name:'小馄饨',desc:'儿童尺寸',allergen:true,nutrition:'碳水+蛋白质',portion:'5-8个',steps:['包小馄饨（儿童尺寸）','水开下锅','煮至浮起再煮2分钟','可加少量紫菜虾皮'],taboo:'注意馄饨皮是否含过敏成分'},
+    {name:'酸奶',desc:'无糖原味',allergen:true,nutrition:'富含钙、益生菌',portion:'50-100ml',steps:['选择无糖原味酸奶','从少量开始，饭后食用','可直接或拌水果泥'],taboo:'1岁以下不建议，空腹不宜'},
+    {name:'三文鱼块',desc:'煎/蒸',allergen:true,nutrition:'富含DHA、Omega-3',portion:'20-30g',steps:['三文鱼切小块','柠檬汁腌5分钟去腥','蒸8分钟或煎至两面金黄','压成小块'],taboo:'确保熟透，不宜生食'}
   ]}
 };
 function getCurrentRecipe(){
@@ -2167,16 +3039,44 @@ function getCurrentRecipe(){
   return cur;
 }
 
+function showRecipeDetail(recipe, itemName){
+  var item = null;
+  recipe.items.forEach(function(it){ if(it.name === itemName) item = it; });
+  if(!item) return;
+  var html='<div class="modal-header"><h3>🥦 '+item.name+'</h3><button class="modal-close" onclick="closeModal()">×</button></div>';
+  html+='<div style="padding:12px">';
+  if(item.nutrition){
+    html+='<div class="tip info" style="margin-bottom:8px">💪 营养：'+item.nutrition+'</div>';
+  }
+  if(item.portion){
+    html+='<div class="tip info" style="margin-bottom:8px">⚖️ 建议份量：'+item.portion+'</div>';
+  }
+  if(item.allergen){
+    html+='<div class="tip warn" style="margin-bottom:8px">⚠️ 高敏食物，首次少量尝试，观察3天无过敏反应再加量</div>';
+  }
+  if(item.steps && item.steps.length){
+    html+='<div style="font-weight:700;margin:10px 0 8px">📋 制作步骤：</div>';
+    item.steps.forEach(function(s, i){
+      html+='<div style="display:flex;gap:10px;margin-bottom:10px"><div style="width:24px;height:24px;background:var(--c-green-deep);color:#fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0">'+(i+1)+'</div><div style="font-size:13px;line-height:1.6;padding-top:2px">'+s+'</div></div>';
+    });
+  }
+  if(item.taboo){
+    html+='<div class="tip warn" style="margin-top:10px">🚫 食用禁忌：'+item.taboo+'</div>';
+  }
+  html+='</div>';
+  openModal(html);
+}
+
 function renderFood(){
   var m=ageMonthsTotal(), food=DB.get('food',{blacklist:[],logs:[]}), recipe=getCurrentRecipe();
   var recipeHtml='';
   if(!recipe){
     recipeHtml='<div class="tip info">宝宝当前'+m+'月龄，建议6月龄开始添加辅食。纯母乳/配方奶喂养即可。</div>';
   }else{
-    recipeHtml='<div class="card" style="background:linear-gradient(135deg,var(--c-green-light),#fff)"><div style="text-align:center;padding:6px 0"><div style="font-size:32px">🥦</div><div style="font-size:15px;font-weight:700">'+recipe.stage+'</div><div class="tip info" style="display:inline-block">质地：'+recipe.texture+' · 内容随月龄自动更新</div></div></div>'+
-      '<div class="card"><div class="card-title"><span class="left"><span class="icon">📖</span>推荐食谱</span></div><div class="table-wrap"><table><thead><tr><th>食材</th><th>说明</th><th>过敏风险</th></tr></thead><tbody>';
+    recipeHtml='<div class="card" style="background:linear-gradient(135deg,var(--c-green-light),#fff)"><div style="text-align:center;padding:6px 0"><div style="font-size:32px">🥦</div><div style="font-size:15px;font-weight:700">'+recipe.stage+'</div><div class="tip info" style="display:inline-block">质地：'+recipe.texture+' · 点击食材查看制作步骤</div></div></div>'+
+      '<div class="card"><div class="card-title"><span class="left"><span class="icon">📖</span>推荐食谱</span></div><div class="table-wrap"><table><thead><tr><th>食材</th><th>说明</th><th>过敏</th></tr></thead><tbody>';
     recipe.items.forEach(function(f){
-      recipeHtml+='<tr><td>'+f.name+'</td><td style="white-space:normal">'+f.desc+'</td><td>'+(f.allergen?'<span class="badge badge-paid">高敏</span>':'<span class="badge badge-free">低敏</span>')+'</td></tr>';
+      recipeHtml+='<tr onclick="showRecipeDetail(getCurrentRecipe(),\''+f.name+'\')" style="cursor:pointer"><td style="font-weight:600">'+f.name+'</td><td style="white-space:normal">'+f.desc+'</td><td>'+(f.allergen?'<span class="badge badge-paid">高敏</span>':'<span class="badge badge-free">低敏</span>')+'</td></tr>';
     });
     recipeHtml+='</tbody></table></div>'+
       (recipe.items.some(function(f){return f.allergen&&food.blacklist.indexOf(f.name)>=0;})?'<div class="tip warn">⚠️ 清单中有食材在过敏黑名单中，已标注！</div>':'')+'</div>';
@@ -2189,10 +3089,11 @@ function renderFood(){
     });
   }else{ blacklistHtml='<div class="empty" style="padding:14px"><span class="icon">🚫</span>暂无过敏食物</div>'; }
 
+  var visibleLogs = sortRecordsDesc(food.logs.filter(function(r){return !r._deletedAt;})).slice(0,20);
   var logsHtml='';
-  food.logs.slice().reverse().slice(0,20).forEach(function(l,i){
-    var origIdx=food.logs.indexOf(l);
-    logsHtml+='<div class="record-item"><div class="ri-main"><div class="ri-content">'+l.foods+'</div><div class="ri-time">'+l.date+' '+l.time+' · '+(l.member||'')+(l.reaction?' · ⚠️'+l.reaction:'')+'</div></div><button class="ri-del" onclick="delFoodLog('+origIdx+')">×</button></div>';
+  visibleLogs.forEach(function(l){
+    var noteStr = l.reaction ? ' · ⚠️'+notePreview(l.reaction,10) : '';
+    logsHtml+='<div class="record-item" style="cursor:pointer" onclick="showRecordDetail(\'辅食详情\', '+JSON.stringify(l).replace(/'/g,"&#39;")+', \'food\')"><div class="ri-main"><div class="ri-content">'+l.foods+noteStr+'</div><div class="ri-time">'+l.date+' '+l.time+' · '+(l.member||'')+'</div></div><button class="ri-del" onclick="event.stopPropagation();delFoodLog(\''+l.id+'\')">×</button></div>';
   });
   if(!logsHtml) logsHtml='<div class="empty"><span class="icon">🥦</span>暂无记录</div>';
 
@@ -2217,7 +3118,6 @@ function delBlacklist(i){
   toast('已删除'); renderModule('food');
 }
 function addFoodLog(){
-  var food=DB.get('food',{blacklist:[],logs:[]});
   openModal('<div class="modal-header"><h3>📝 辅食记录</h3><button class="modal-close" onclick="closeModal()">×</button></div>'+memberBar()+
     '<div class="form-row"><div class="form-group"><label>时间</label><input type="datetime-local" id="fl_time" value="'+nowDT()+'"></div></div>'+
     '<div class="form-row"><div class="form-group" style="flex:2"><label>食材/菜品</label><input type="text" id="fl_foods" placeholder="如：南瓜米粉泥"></div></div>'+
@@ -2228,18 +3128,27 @@ function addFoodLog(){
 function saveFoodLog(){
   var t=document.getElementById('fl_time').value; if(!t){toast('请填写时间');return;}
   var d=new Date(t);
-  var foods=document.getElementById('fl_time')?document.getElementById('fl_foods').value.trim():'';
+  var foods=document.getElementById('fl_foods').value.trim();
+  if(!foods){toast('请输入食材');return;}
   var food=DB.get('food',{blacklist:[],logs:[]});
   var risky=null;
   for(var i=0;i<food.blacklist.length;i++){ if(foods.indexOf(food.blacklist[i])>=0){risky=food.blacklist[i];break;} }
   if(risky&&!confirm('⚠️ 风险提醒：'+foods+' 含过敏黑名单中的"'+risky+'"，确认添加？')) return;
-  var rec={id:String(Date.now()),date:fmtDate(d),time:fmtTime(d),foods:foods,reaction:document.getElementById('fl_reaction').value,member:state.currentMember};
+  var rec={id:String(Date.now())+'_'+Math.random().toString(36).substr(2,5),date:fmtDate(d),time:fmtTime(d),foods:foods,reaction:document.getElementById('fl_reaction').value,member:state.currentMember,_ts:String(Date.now())};
   food.logs.push(rec); DB.set('food',food);
   closeModal(); toast('已保存✅'); renderModule('food');
 }
-function delFoodLog(i){
+function delFoodLog(id){
   if(!confirm('确认删除？')) return;
-  var food=DB.get('food',{blacklist:[],logs:[]}); food.logs.splice(i,1); DB.set('food',food);
+  var food=DB.get('food',{blacklist:[],logs:[]});
+  for(var i=0;i<food.logs.length;i++){
+    if(food.logs[i].id===id){
+      food.logs[i]._deletedAt=new Date().toISOString();
+      food.logs[i]._ts=String(Date.now());
+      break;
+    }
+  }
+  DB.set('food',food);
   toast('已删除'); renderModule('food');
 }
 
@@ -2249,52 +3158,96 @@ setStatus('辅食管理加载完成');
 /* ====================================================
    健康营养打卡
    ==================================================== */
-var HEALTH_ITEMS=[
-  {key:'water',icon:'💧',label:'饮水量',type:'value',unit:'ml',color:'mod-blue'},
-  {key:'AD',icon:'💊',label:'维生素AD',type:'check',color:'mod-orange'},
-  {key:'D3',icon:'☀️',label:'维生素D3',type:'check',color:'mod-yellow'},
-  {key:'DHA',icon:'🐟',label:'DHA',type:'check',color:'mod-green'},
-  {key:'probiotic',icon:'🦠',label:'益生菌',type:'check',color:'mod-purple'},
-  {key:'iron',icon:'💉',label:'铁剂',type:'check',color:'mod-rose'}
+var HEALTH_ITEMS_DEFAULT=[
+  {key:'water',icon:'💧',label:'饮水量',type:'value',unit:'ml',color:'mod-blue',custom:false},
+  {key:'AD',icon:'💊',label:'维生素AD',type:'check',color:'mod-orange',custom:false},
+  {key:'D3',icon:'☀️',label:'维生素D3',type:'check',color:'mod-yellow',custom:false},
+  {key:'DHA',icon:'🐟',label:'DHA',type:'check',color:'mod-green',custom:false},
+  {key:'probiotic',icon:'🦠',label:'益生菌',type:'check',color:'mod-purple',custom:false},
+  {key:'iron',icon:'💉',label:'铁剂',type:'check',color:'mod-rose',custom:false}
 ];
+
+function getHealthItems(){
+  var custom = DB.get('healthCustom', []);
+  return HEALTH_ITEMS_DEFAULT.concat(custom);
+}
+
+function getHealthItemLabel(key){
+  var items = getHealthItems();
+  for(var i=0; i<items.length; i++){
+    if(items[i].key === key) return items[i];
+  }
+  return null;
+}
 
 function renderHealth(){
   var health=DB.get('health',{logs:[],reactions:[]}), today=todayStr();
-  var todayLogs=health.logs.filter(function(l){return l.date===today;});
+  var items = getHealthItems();
+  var todayLogs=health.logs.filter(function(l){return l.date===today && !l._deletedAt;});
   var todayWater=todayLogs.filter(function(l){return l.item==='water';}).reduce(function(s,l){return s+(+l.value||0);},0);
 
-  var checkGrid=HEALTH_ITEMS.map(function(it){
+  var checkGrid=items.map(function(it){
     if(it.type==='value'){
       return '<div class="check-item '+it.color+'" onclick="quickHealthCheck(\''+it.key+'\',\''+it.label+'\')"><span class="ci-icon">'+it.icon+'</span><div class="ci-label">'+it.label+'</div><div class="ci-status">'+todayWater+'ml · 点击记录</div></div>';
     }
     var done=todayLogs.some(function(l){return l.item===it.key;});
-    return '<div class="check-item '+it.color+' '+(done?'done':'')+'" style="'+(done?'':'opacity:0.6')+'" onclick="quickHealthCheck(\''+it.key+'\',\''+it.label+'\')"><span class="ci-icon">'+it.icon+'</span><div class="ci-label">'+it.label+'</div><div class="ci-status">'+(done?'✅已打卡':'未打卡')+'</div></div>';
+    var delBtn = it.custom ? '<button class="ri-del" onclick="event.stopPropagation();delHealthCustom(\''+it.key+'\')" style="position:absolute;right:4px;top:4px;font-size:14px">×</button>' : '';
+    return '<div class="check-item '+it.color+' '+(done?'done':'')+'" style="position:relative;'+(done?'':'opacity:0.6')+'" onclick="quickHealthCheck(\''+it.key+'\',\''+it.label+'\')"><span class="ci-icon">'+it.icon+'</span><div class="ci-label">'+it.label+'</div><div class="ci-status">'+(done?'✅已打卡':'未打卡')+'</div>'+delBtn+'</div>';
   }).join('');
 
+  var visibleReactions = sortRecordsDesc((health.reactions||[]).filter(function(r){return !r._deletedAt;})).slice(0,10);
   var reactionHtml='';
-  (health.reactions||[]).slice(-10).reverse().forEach(function(r){
-    reactionHtml+='<div class="record-item"><div class="ri-main"><div class="ri-content">⚠️ '+r.item+'</div><div class="ri-time">'+r.date+' '+r.time+' · '+r.desc+' · '+(r.member||'')+'</div></div><button class="ri-del" onclick="delReaction(\''+r.id+'\')">×</button></div>';
+  visibleReactions.forEach(function(r){
+    reactionHtml+='<div class="record-item" style="cursor:pointer" onclick="showRecordDetail(\'反应详情\', '+JSON.stringify(r).replace(/'/g,"&#39;")+', \'health\')"><div class="ri-main"><div class="ri-content">⚠️ '+r.item+'</div><div class="ri-time">'+r.date+' '+r.time+' · '+notePreview(r.desc,20)+' · '+(r.member||'')+'</div></div><button class="ri-del" onclick="event.stopPropagation();delReaction(\''+r.id+'\')">×</button></div>';
   });
   if(!reactionHtml) reactionHtml='<div class="empty" style="padding:14px"><span class="icon">⚠️</span>暂无不良反应</div>';
 
+  var allLogs = health.logs.filter(function(l){return !l._deletedAt;});
+  var hFiltered = state.filterDate ? allLogs.filter(function(l){return l.date===state.filterDate;}) : sortRecordsDesc(allLogs).slice(0,30);
   var historyHtml='';
-  var hFiltered=state.filterDate?health.logs.filter(function(l){return l.date===state.filterDate;}):health.logs.slice(-30).reverse();
   hFiltered.forEach(function(l){
-    var it=null;
-    for(var i=0;i<HEALTH_ITEMS.length;i++){ if(HEALTH_ITEMS[i].key===l.item){it=HEALTH_ITEMS[i];break;} }
-    historyHtml+='<div class="record-item"><span style="font-size:18px">'+(it?it.icon:'💊')+'</span><div class="ri-main"><div class="ri-content">'+(it?it.label:l.item)+' '+(l.value?l.value+'ml':'')+'</div><div class="ri-time">'+l.date+' '+l.time+' · '+(l.member||'')+'</div></div></div>';
+    var it = getHealthItemLabel(l.item);
+    historyHtml+='<div class="record-item" style="cursor:pointer" onclick="showRecordDetail(\'打卡详情\', '+JSON.stringify(l).replace(/'/g,"&#39;")+', \'health\')"><span style="font-size:18px">'+(it?it.icon:'💊')+'</span><div class="ri-main"><div class="ri-content">'+(it?it.label:l.item)+' '+(l.value?l.value+'ml':'')+'</div><div class="ri-time">'+l.date+' '+l.time+' · '+(l.member||'')+'</div></div></div>';
   });
   if(!historyHtml) historyHtml='<div class="empty"><span class="icon">💊</span>暂无记录</div>';
 
   return subHeader('💊','健康营养打卡')+memberBar()+
     '<div class="summary-bar"><div class="sb-item"><div class="num">'+todayWater+'ml</div><div class="label">今日饮水量</div></div>'+
-    '<div class="sb-item"><div class="num">'+todayLogs.filter(function(l){return l.item!=='water';}).length+'/'+(HEALTH_ITEMS.length-1)+'</div><div class="label">今日补充剂</div></div></div>'+
-    '<div class="card"><div class="card-title"><span class="left"><span class="icon">📋</span>今日打卡面板</span><span style="font-size:11px;color:var(--text-sub)">'+today+'</span></div>'+
+    '<div class="sb-item"><div class="num">'+todayLogs.filter(function(l){return l.item!=='water';}).length+'/'+(items.length-1)+'</div><div class="label">今日补充剂</div></div></div>'+
+    '<div class="card"><div class="card-title"><span class="left"><span class="icon">📋</span>今日打卡面板</span><span style="display:flex;align-items:center;gap:6px"><span style="font-size:11px;color:var(--text-sub)">'+today+'</span><button class="btn btn-sm btn-rose" onclick="addHealthCustom()">+药品</button></span></div>'+
     '<div class="check-grid">'+checkGrid+'</div></div>'+
     '<div class="card"><div class="card-title"><span class="left"><span class="icon">⚠️</span>不良反应记录</span><button class="btn btn-sm btn-rose" onclick="addReaction()">+记录</button></div>'+reactionHtml+'</div>'+
     '<div class="card"><div class="card-title"><span class="left"><span class="icon">📜</span>历史打卡</span><input type="date" id="hFilter" value="'+state.filterDate+'" onchange="state.filterDate=this.value;renderModule(\'health\')" style="width:auto"></div>'+historyHtml+'</div>';
 }
 function initHealth(){}
+
+function addHealthCustom(){
+  openModal('<div class="modal-header"><h3>➕ 自定义药剂/补充剂</h3><button class="modal-close" onclick="closeModal()">×</button></div>'+
+    '<div class="form-row"><div class="form-group"><label>名称</label><input type="text" id="hc_label" placeholder="如：钙剂、锌、益生菌"></div></div>'+
+    '<div class="form-row"><div class="form-group" style="flex:1"><label>图标(emoji)</label><input type="text" id="hc_icon" placeholder="💊" value="💊"></div>'+
+    '<div class="form-group" style="flex:1"><label>类型</label><select id="hc_type"><option value="check">打卡型</option><option value="value">数值型(需填量)</option></select></div></div>'+
+    '<div class="form-row"><div class="form-group"><label>单位(数值型填)</label><input type="text" id="hc_unit" placeholder="如：ml/mg/滴"></div></div>'+
+    '<button class="btn btn-primary btn-block" onclick="saveHealthCustom()">保存</button>');
+}
+
+function saveHealthCustom(){
+  var label=document.getElementById('hc_label').value.trim(); if(!label){toast('请输入名称');return;}
+  var icon=document.getElementById('hc_icon').value.trim()||'💊';
+  var type=document.getElementById('hc_type').value;
+  var unit=document.getElementById('hc_unit').value.trim()||'';
+  var custom=DB.get('healthCustom',[]);
+  custom.push({key:'custom_'+Date.now(),icon:icon,label:label,type:type,unit:unit,color:'mod-rose',custom:true});
+  DB.set('healthCustom',custom);
+  closeModal(); toast('已添加✅'); renderModule('health');
+}
+
+function delHealthCustom(key){
+  if(!confirm('确认删除该自定义项？')) return;
+  var custom=DB.get('healthCustom',[]);
+  custom=custom.filter(function(c){return c.key!==key;});
+  DB.set('healthCustom',custom);
+  toast('已删除'); renderModule('health');
+}
 
 function addReaction(){
   openModal('<div class="modal-header"><h3>⚠️ 不良反应记录</h3><button class="modal-close" onclick="closeModal()">×</button></div>'+memberBar()+
@@ -2308,13 +3261,20 @@ function saveReaction(){
   var t=document.getElementById('r_time').value; if(!t){toast('请填写时间');return;}
   var d=new Date(t);
   var health=DB.get('health',{logs:[],reactions:[]});
-  health.reactions.push({id:String(Date.now()),date:fmtDate(d),time:fmtTime(d),item:document.getElementById('r_item').value,desc:document.getElementById('r_desc').value,member:state.currentMember});
+  health.reactions.push({id:String(Date.now())+'_'+Math.random().toString(36).substr(2,5),date:fmtDate(d),time:fmtTime(d),item:document.getElementById('r_item').value,desc:document.getElementById('r_desc').value,member:state.currentMember,_ts:String(Date.now())});
   DB.set('health',health); closeModal(); toast('已保存✅'); renderModule('health');
 }
 function delReaction(id){
   if(!confirm('确认删除？')) return;
   var health=DB.get('health',{logs:[],reactions:[]});
-  health.reactions=health.reactions.filter(function(r){return r.id!==id;}); DB.set('health',health);
+  for(var i=0;i<health.reactions.length;i++){
+    if(health.reactions[i].id===id){
+      health.reactions[i]._deletedAt=new Date().toISOString();
+      health.reactions[i]._ts=String(Date.now());
+      break;
+    }
+  }
+  DB.set('health',health);
   toast('已删除'); renderModule('health');
 }
 
@@ -2407,27 +3367,54 @@ setStatus('技能记录加载完成');
 /* ====================================================
    采购&备忘 + 家庭成员 + 初始化
    ==================================================== */
+/* 采购金额汇总 */
+function getPurchaseSummary(){
+  var memo = DB.get('memo', {purchase:[],notes:[]});
+  var now = new Date();
+  var monthStr = now.getFullYear() + '-' + String(now.getMonth()+1).padStart(2,'0');
+  var yearStr = String(now.getFullYear());
+  var monthTotal = 0, yearTotal = 0, allTotal = 0;
+  memo.purchase.forEach(function(p){
+    if(p._deletedAt) return;
+    var amount = p.total || (p.price||0) * (p.quantity||1);
+    allTotal += amount;
+    if(p.date && p.date.indexOf(monthStr) === 0) monthTotal += amount;
+    if(p.date && p.date.indexOf(yearStr) === 0) yearTotal += amount;
+  });
+  return { month: monthTotal, year: yearTotal, all: allTotal };
+}
+
 function renderMemo(){
   var memo=DB.get('memo',{purchase:[],notes:[]});
-  var purchaseUndone=memo.purchase.filter(function(p){return !p.done;});
-  var purchaseDone=memo.purchase.filter(function(p){return p.done;});
+  var visiblePurchase = memo.purchase.filter(function(p){return !p._deletedAt;});
+  var purchaseUndone = visiblePurchase.filter(function(p){return !p.done;});
+  var purchaseDone = visiblePurchase.filter(function(p){return p.done;});
+  var summary = getPurchaseSummary();
+  /* 按日期倒序 */
+  var sortedPurchase = sortRecordsDesc(visiblePurchase.map(function(p){return p;}));
 
   var purchaseHtml='';
-  memo.purchase.forEach(function(p,i){
-    purchaseHtml+='<div class="record-item" style="'+(p.done?'opacity:0.5':'')+'"><input type="checkbox" '+(p.done?'checked':'')+' onclick="togglePurchase('+i+')">'+
-      '<div class="ri-main"><div class="ri-content" style="'+(p.done?'text-decoration:line-through':'')+'">'+p.name+'</div>'+
-      '<div class="ri-time">'+p.date+' · '+(p.member||'')+(p.note?' · '+p.note:'')+'</div></div><button class="ri-del" onclick="delPurchase('+i+')">×</button></div>';
+  sortedPurchase.forEach(function(p){
+    var amount = p.total || (p.price||0) * (p.quantity||1);
+    var amountStr = amount > 0 ? ' · ¥'+amount.toFixed(1) : '';
+    var qtyStr = p.quantity > 1 ? ' x'+p.quantity : '';
+    var priceStr = p.price > 0 ? ' @¥'+p.price.toFixed(1) : '';
+    purchaseHtml+='<div class="record-item" style="'+(p.done?'opacity:0.5':'')+'"><input type="checkbox" '+(p.done?'checked':'')+' onclick="togglePurchase(\''+p.id+'\')">'+
+      '<div class="ri-main" style="cursor:pointer" onclick="showRecordDetail(\'采购详情\', '+JSON.stringify(p).replace(/'/g,"&#39;")+', \'purchase\')"><div class="ri-content" style="'+(p.done?'text-decoration:line-through':'')+'">'+p.name+'</div>'+
+      '<div class="ri-time">'+p.date+qtyStr+priceStr+amountStr+' · '+(p.member||'')+(p.note?' · '+p.note:'')+'</div></div><button class="ri-del" onclick="delPurchase(\''+p.id+'\')">×</button></div>';
   });
   if(!purchaseHtml) purchaseHtml='<div class="empty"><span class="icon">🛒</span>暂无采购项</div>';
 
   var notesHtml='';
-  memo.notes.slice().reverse().forEach(function(n,i){
-    var idx=memo.notes.length-1-i;
-    notesHtml+='<div class="record-item"><div class="ri-main"><div class="ri-content">'+n.text+'</div><div class="ri-time">'+n.date+' · '+(n.member||'')+'</div></div><button class="ri-del" onclick="delNote('+idx+')">×</button></div>';
+  sortRecordsDesc(memo.notes.filter(function(n){return !n._deletedAt;})).forEach(function(n){
+    notesHtml+='<div class="record-item"><div class="ri-main"><div class="ri-content">'+n.text+'</div><div class="ri-time">'+n.date+' · '+(n.member||'')+'</div></div><button class="ri-del" onclick="delNote(\''+n.id+'\')">×</button></div>';
   });
   if(!notesHtml) notesHtml='<div class="empty"><span class="icon">📌</span>暂无备忘</div>';
 
   return subHeader('📝','采购&长期备忘')+memberBar()+
+    '<div class="summary-bar"><div class="sb-item"><div class="num">¥'+summary.month.toFixed(1)+'</div><div class="label">本月支出</div></div>'+
+    '<div class="sb-item"><div class="num">¥'+summary.year.toFixed(1)+'</div><div class="label">本年累计</div></div>'+
+    '<div class="sb-item"><div class="num">¥'+summary.all.toFixed(1)+'</div><div class="label">总计</div></div></div>'+
     '<div class="card"><div class="card-title"><span class="left"><span class="icon">🛒</span>采购清单</span><button class="btn btn-sm btn-indigo" onclick="addPurchase()">+新增</button></div>'+
     '<div class="tip info">待采购 '+purchaseUndone.length+' 项 · 已完成 '+purchaseDone.length+' 项</div>'+purchaseHtml+'</div>'+
     '<div class="card"><div class="card-title"><span class="left"><span class="icon">📌</span>长期备忘</span><button class="btn btn-sm btn-ghost" onclick="addNote()">+新增</button></div>'+notesHtml+'</div>';
@@ -2437,23 +3424,44 @@ function initMemo(){}
 function addPurchase(){
   openModal('<div class="modal-header"><h3>🛒 新增采购项</h3><button class="modal-close" onclick="closeModal()">×</button></div>'+memberBar()+
     '<div class="form-row"><div class="form-group" style="flex:2"><label>物品名称</label><input type="text" id="p_name" placeholder="如：3段奶粉"></div></div>'+
+    '<div class="form-row"><div class="form-group" style="flex:1"><label>单价(元)</label><input type="number" id="p_price" placeholder="0.00" step="0.01" min="0"></div>'+
+    '<div class="form-group" style="flex:1"><label>数量</label><input type="number" id="p_quantity" value="1" min="1"></div></div>'+
+    '<div class="form-row"><div class="form-group"><label>采购日期</label><input type="date" id="p_date" value="'+todayStr()+'"></div></div>'+
     '<div class="form-row"><div class="form-group" style="flex:2"><label>备注(选填)</label><input type="text" id="p_note" placeholder="如：XX品牌"></div></div>'+
     '<button class="btn btn-primary btn-block" onclick="savePurchase()">添加</button>');
   renderMemberChips();
 }
 function savePurchase(){
   var name=document.getElementById('p_name').value.trim(); if(!name){toast('请输入名称');return;}
+  var price=parseFloat(document.getElementById('p_price').value)||0;
+  var quantity=parseInt(document.getElementById('p_quantity').value)||1;
   var memo=DB.get('memo',{purchase:[],notes:[]});
-  memo.purchase.push({name:name,note:document.getElementById('p_note').value,done:false,date:todayStr(),member:state.currentMember});
+  memo.purchase.push({id:String(Date.now())+'_'+Math.random().toString(36).substr(2,5),name:name,price:price,quantity:quantity,total:price*quantity,note:document.getElementById('p_note').value,done:false,date:document.getElementById('p_date').value,member:state.currentMember,_ts:String(Date.now())});
   DB.set('memo',memo); closeModal(); toast('已添加✅'); renderModule('memo');
 }
-function togglePurchase(i){
-  var memo=DB.get('memo',{purchase:[],notes:[]}); memo.purchase[i].done=!memo.purchase[i].done; DB.set('memo',memo);
+function togglePurchase(id){
+  var memo=DB.get('memo',{purchase:[],notes:[]});
+  for(var i=0;i<memo.purchase.length;i++){
+    if(memo.purchase[i].id===id){
+      memo.purchase[i].done=!memo.purchase[i].done;
+      memo.purchase[i]._ts=String(Date.now());
+      break;
+    }
+  }
+  DB.set('memo',memo);
   renderModule('memo');
 }
-function delPurchase(i){
+function delPurchase(id){
   if(!confirm('确认删除？')) return;
-  var memo=DB.get('memo',{purchase:[],notes:[]}); memo.purchase.splice(i,1); DB.set('memo',memo);
+  var memo=DB.get('memo',{purchase:[],notes:[]});
+  for(var i=0;i<memo.purchase.length;i++){
+    if(memo.purchase[i].id===id){
+      memo.purchase[i]._deletedAt=new Date().toISOString();
+      memo.purchase[i]._ts=String(Date.now());
+      break;
+    }
+  }
+  DB.set('memo',memo);
   toast('已删除'); renderModule('memo');
 }
 function addNote(){
@@ -2465,12 +3473,20 @@ function addNote(){
 function saveNote(){
   var text=document.getElementById('n_text').value.trim(); if(!text){toast('请输入内容');return;}
   var memo=DB.get('memo',{purchase:[],notes:[]});
-  memo.notes.push({text:text,date:todayStr(),member:state.currentMember});
+  memo.notes.push({id:String(Date.now())+'_'+Math.random().toString(36).substr(2,5),text:text,date:todayStr(),member:state.currentMember,_ts:String(Date.now())});
   DB.set('memo',memo); closeModal(); toast('已保存✅'); renderModule('memo');
 }
-function delNote(i){
+function delNote(id){
   if(!confirm('确认删除？')) return;
-  var memo=DB.get('memo',{purchase:[],notes:[]}); memo.notes.splice(i,1); DB.set('memo',memo);
+  var memo=DB.get('memo',{purchase:[],notes:[]});
+  for(var i=0;i<memo.notes.length;i++){
+    if(memo.notes[i].id===id){
+      memo.notes[i]._deletedAt=new Date().toISOString();
+      memo.notes[i]._ts=String(Date.now());
+      break;
+    }
+  }
+  DB.set('memo',memo);
   toast('已删除'); renderModule('memo');
 }
 
@@ -2502,14 +3518,137 @@ setStatus('备忘模块加载完成');
 /* ====================================================
    初始化
    ==================================================== */
+/* ====================================================
+   数据迁移（版本化升级，保留原有数据）
+   ==================================================== */
+function migrateData(){
+  var CURRENT = 4;
+  var v = DB.get('_dataVersion', 0);
+  if(v >= CURRENT) return;
+
+  /* v0→v1: 给所有记录添加时间戳_ts */
+  if(v < 1){
+    var keys1 = ['feeding','daily','nursing','growth','skills'];
+    keys1.forEach(function(k){
+      var data = DB.get(k, []);
+      if(Array.isArray(data)){
+        data.forEach(function(r){
+          if(!r._ts && r.id) r._ts = String(r.id);
+        });
+        DB.set(k, data);
+      }
+    });
+    /* health 有 logs 和 reactions */
+    var health = DB.get('health', {logs:[],reactions:[]});
+    if(health.logs){
+      health.logs.forEach(function(r){ if(!r._ts && r.id) r._ts = String(r.id); });
+    }
+    if(health.reactions){
+      health.reactions.forEach(function(r){ if(!r._ts && r.id) r._ts = String(r.id); });
+    }
+    DB.set('health', health);
+    /* food 有 logs */
+    var food = DB.get('food', {blacklist:[],logs:[]});
+    if(food.logs){
+      food.logs.forEach(function(r){ if(!r._ts && r.id) r._ts = String(r.id); });
+    }
+    DB.set('food', food);
+    console.log('[Migrate] v0→v1: 添加时间戳完成');
+  }
+
+  /* v1→v2: 采购项添加id/price/quantity/total字段 */
+  if(v < 2){
+    var memo = DB.get('memo', {purchase:[],notes:[]});
+    if(memo.purchase){
+      memo.purchase.forEach(function(p){
+        if(!p.id) p.id = String(Date.now()) + '_' + Math.random().toString(36).substr(2,5);
+        if(p.price === undefined) p.price = 0;
+        if(p.quantity === undefined) p.quantity = 1;
+        if(p.total === undefined) p.total = (p.price||0) * (p.quantity||1);
+      });
+    }
+    if(memo.notes){
+      memo.notes.forEach(function(n){
+        if(!n.id) n.id = String(Date.now()) + '_' + Math.random().toString(36).substr(2,5);
+      });
+    }
+    DB.set('memo', memo);
+    console.log('[Migrate] v1→v2: 采购项字段升级完成');
+  }
+
+  /* v2→v3: 初始化自定义项和疫苗排序 */
+  if(v < 3){
+    if(DB.get('nursingCustom', null) === null) DB.set('nursingCustom', []);
+    if(DB.get('healthCustom', null) === null) DB.set('healthCustom', []);
+    if(DB.get('vaccineOrder', null) === null){
+      DB.set('vaccineOrder', VACCINE_LIST.map(function(vv){ return vv.name; }));
+    }
+    console.log('[Migrate] v2→v3: 初始化自定义项完成');
+  }
+
+  /* v3→v4: 早教数据结构升级（对象→数组）+ 初始化早教自定义项 */
+  if(v < 4){
+    /* 初始化早教自定义项 */
+    if(DB.get('earlyeduCustom', null) === null) DB.set('earlyeduCustom', []);
+    /* 将旧版earlyedu对象格式（{key:{done:true,date:...}}）转换为新版数组格式 */
+    var oldEdu = DB.get('earlyedu', null);
+    if(oldEdu && !Array.isArray(oldEdu)){
+      var newEdu = [];
+      for(var ek in oldEdu){
+        if(oldEdu.hasOwnProperty(ek) && oldEdu[ek] && oldEdu[ek].done){
+          newEdu.push({
+            id: 'migrated_'+ek+'_'+Date.now(),
+            item: ek,
+            date: oldEdu[ek].date || todayStr(),
+            time: '',
+            note: '',
+            member: oldEdu[ek].member || '',
+            _ts: String(Date.now())
+          });
+        }
+      }
+      DB.set('earlyedu', newEdu);
+      console.log('[Migrate] v3→v4: 早教数据迁移 ' + newEdu.length + ' 条记录');
+    } else if(oldEdu === null){
+      DB.set('earlyedu', []);
+    }
+    console.log('[Migrate] v3→v4: 早教模块升级完成');
+  }
+
+  DB.set('_dataVersion', CURRENT);
+  console.log('[Migrate] 数据迁移完成, 版本: ' + CURRENT);
+}
+
+/* 检查应用版本，清理旧缓存 */
+function checkAppVersion(){
+  var saved = DB.get('appVersion', '');
+  if(saved && saved !== APP_VERSION){
+    if('caches' in window){
+      caches.keys().then(function(names){
+        names.forEach(function(name){
+          if(name !== 'hanyu-v3.1') caches.delete(name);
+        });
+      });
+    }
+    console.log('[PWA] 版本更新: ' + saved + ' → ' + APP_VERSION);
+  }
+  DB.set('appVersion', APP_VERSION);
+}
+
 setStatus('所有模块就绪，启动中...');
 
 function init(){
   try {
     setStatus('加载数据中...');
     
-    /* 同步初始化数据（localStorage，兼容iOS） */
+    /* 同步初始化数据（localStorage+IndexedDB备份） */
     DB.init();
+    
+    /* 数据迁移（保留原有数据，添加新字段） */
+    migrateData();
+    
+    /* 检查应用版本，清理旧缓存 */
+    checkAppVersion();
     
     setStatus('加载完成');
     renderNav();
@@ -2525,6 +3664,9 @@ function init(){
       renderModule(state.currentModule);
       refreshTopMeta();
     });
+    
+    /* 启动定时轮询同步（每60秒拉取云端最新数据） */
+    startSyncPolling();
     
     /* 启动后检查备份提醒 */
     setTimeout(function(){
