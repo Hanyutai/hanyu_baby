@@ -345,7 +345,42 @@ var DB = {
       self._loadFromLocalStorage();
       self._loaded = true;
     }
-    /* 异步初始化IndexedDB备份，不阻塞主流程 */
+    /* 检查localStorage是否为空（可能被Safari清除） */
+    var hasLocalData = false;
+    for(var k in self._cache){
+      if(self._cache.hasOwnProperty(k)){
+        hasLocalData = true; break;
+      }
+    }
+    if(!hasLocalData){
+      /* localStorage为空，尝试从IndexedDB恢复 */
+      self._initIDB();
+      /* 等IndexedDB就绪后恢复，最多等3秒 */
+      var restoreTimer = setTimeout(function(){
+        if(cb) cb();
+      }, 3000);
+      var checkIDB = setInterval(function(){
+        if(self._idbReady){
+          clearInterval(checkIDB);
+          clearTimeout(restoreTimer);
+          self.restoreFromIDB(function(ok, idbData){
+            if(ok && idbData){
+              var hasIDBData = false;
+              for(var ik in idbData){
+                if(idbData.hasOwnProperty(ik)){ hasIDBData = true; break; }
+              }
+              if(hasIDBData){
+                console.log('[DB] 从IndexedDB恢复数据');
+                self._cache = idbData;
+              }
+            }
+            if(cb) cb();
+          });
+        }
+      }, 100);
+      return;
+    }
+    /* localStorage有数据，异步初始化IndexedDB备份 */
     self._initIDB();
     if(cb) cb();
   },
@@ -1025,13 +1060,14 @@ var CloudSync = {
       self.enabled = true;
       /* 自动建表（如果还没建的话） */
       self.ensureTable(function(){
-        /* 自动拉取云端数据 */
-        self.pull(function(ok){
-          if(ok){
-            setStatus('云端同步完成');
-            toast('☁️ 云端数据已同步');
-          }
-          if(cb) cb();
+        /* 先推送本地数据（确保本地新数据不丢），再拉取合并 */
+        self.push(function(){
+          self.pull(function(ok){
+            if(ok){
+              setStatus('云端同步完成');
+            }
+            if(cb) cb();
+          });
         });
       });
     } else {
@@ -1067,7 +1103,12 @@ var CloudSync = {
   push: function(cb){
     var self = this;
     if(!self.enabled || !self.config){ if(cb)cb(false,'未配置'); return; }
-    if(self.syncing){ if(cb)cb(false,'正在同步'); return; }
+    if(self.syncing){
+      /* 正在同步：标记需要重试，等当前完成后自动重推 */
+      self._needRetry = true;
+      if(cb) cb(false, '正在同步');
+      return;
+    }
     self.syncing = true;
     
     var allData = DB.getAllData();
@@ -1111,6 +1152,11 @@ var CloudSync = {
             try{ var resp = JSON.parse(xhr.responseText); if(resp.message) errMsg = resp.message; }catch(e){}
             console.log('[CloudSync] push error: ' + xhr.status + ' ' + xhr.responseText);
             if(cb) cb(false, '上传失败(' + errMsg + ')');
+          }
+          /* 如果同步期间有新数据变更，自动重推 */
+          if(self._needRetry){
+            self._needRetry = false;
+            setTimeout(function(){ self.push(function(){}); }, 500);
           }
         }
       };
@@ -1179,13 +1225,43 @@ var CloudSync = {
             try{
               var rows = JSON.parse(xhr.responseText);
               if(rows && rows.length > 0 && rows[0].data){
-                /* 时间戳合并+删除标记 */
                 var cloudData = rows[0].data;
                 var cloudTS = rows[0].updated_at;
                 var localData = DB.getAllData();
+                
+                /* 安全检查：如果本地有数据但云端为空/数据更少，先push本地再merge */
+                var localCount = countLocalData();
+                var cloudCount = 0;
+                var cKeys = ['feeding','daily','nursing','growth','vaccine','food','skills','health','memo','earlyedu'];
+                for(var ci=0; ci<cKeys.length; ci++){
+                  var cv = cloudData[cKeys[ci]];
+                  if(Array.isArray(cv)) cloudCount += cv.length;
+                  else if(cv && cv.logs) cloudCount += cv.logs.length;
+                  else if(cv && cv.notes) cloudCount += cv.notes.length;
+                  else if(cv && cv.purchase) cloudCount += cv.purchase.length;
+                }
+                console.log('[CloudSync] pull: 本地=' + localCount + '条, 云端=' + cloudCount + '条');
+                
+                /* 时间戳合并+删除标记（merge不会丢数据，取并集） */
                 var merged = mergeCloudData(localData, cloudData);
-                /* 清理超过30天的已删除记录 */
                 merged = cleanupDeletedRecords(merged);
+                
+                /* 二次安全检查：合并后数据量不应少于本地 */
+                var mergedCount = 0;
+                for(var mk in merged){
+                  if(!merged.hasOwnProperty(mk)) continue;
+                  var mv = merged[mk];
+                  if(Array.isArray(mv)) mergedCount += mv.length;
+                  else if(mv && mv.logs) mergedCount += mv.logs.length;
+                }
+                if(mergedCount < localCount && localCount > 0){
+                  console.log('[CloudSync] 警告: 合并后数据量(' + mergedCount + ')少于本地(' + localCount + ')，跳过替换');
+                  if(cb) cb(true, '本地数据较新，跳过同步');
+                  /* 本地数据较新，直接push到云端 */
+                  self.push(function(){});
+                  return;
+                }
+                
                 DB.replaceAllData(merged);
                 DB.set('lastCloudPull', new Date().toISOString());
                 /* 如果本地有更新且云端更旧，自动push */
@@ -1202,7 +1278,6 @@ var CloudSync = {
               if(cb) cb(false, '解析数据失败');
             }
           } else if(xhr.status === 404 || xhr.status === 0){
-            /* 表不存在、RLS限制、或网络错误 */
             if(cb) cb(false, '数据表未创建或未开放访问权限');
           } else {
             if(cb) cb(false, '拉取失败(' + xhr.status + ')');
@@ -1218,19 +1293,26 @@ var CloudSync = {
     }
   },
   
-  /* 数据变化时防抖推送 */
+  /* 数据变化时防抖推送（缩短到1秒，减少丢数据风险） */
   onDataChange: function(key, val){
     var self = this;
     if(!self.enabled) return;
-    clearTimeout(self.debounceTimer);
-    self.debounceTimer = setTimeout(function(){
-      self.push(function(ok){
-        if(ok){
-          /* 静默成功，不打扰用户 */
-          console.log('[CloudSync] 自动同步成功');
-        }
-      });
-    }, 3000); /* 3秒防抖 */
+    /* 关键数据立即推送，不防抖 */
+    var criticalKeys = ['feeding','daily','nursing','health','vaccine','earlyedu','growth','food','memo','skills'];
+    var isCritical = false;
+    for(var i=0; i<criticalKeys.length; i++){
+      if(key === criticalKeys[i]){ isCritical = true; break; }
+    }
+    if(isCritical){
+      /* 关键数据：1秒内推送 */
+      clearTimeout(self.debounceTimer);
+      self.debounceTimer = setTimeout(function(){
+        self.push(function(ok){
+          if(ok) console.log('[CloudSync] 自动同步成功');
+          else console.log('[CloudSync] 自动同步失败，等待下次重试');
+        });
+      }, 1000);
+    }
   },
   
   /* 手动同步 */
@@ -1251,6 +1333,40 @@ var CloudSync = {
         }
       });
     });
+  },
+
+  /* 紧急推送：页面即将卸载时调用，用同步 XHR 确保数据不丢 */
+  emergencyPush: function(){
+    var self = this;
+    if(!self.enabled || !self.config) return;
+    try{
+      var allData = DB.getAllData();
+      var dataCount = 0;
+      for(var k in allData){ if(allData.hasOwnProperty(k)) dataCount++; }
+      if(dataCount === 0) return;  /* 无数据不推送 */
+
+      var payload = {
+        family_code: self.config.familyCode,
+        data: allData,
+        device: (typeof state !== 'undefined' && state.currentMember) ? state.currentMember : 'unknown',
+        updated_at: new Date().toISOString()
+      };
+      var jsonStr = JSON.stringify(payload);
+
+      /* 同步 XHR 推送（页面卸载前阻塞发请求，确保请求发出）
+         注意：sendBeacon 无法设置 apikey header，Supabase REST 需要鉴权，
+         所以只能用同步 XHR */
+      var xhr = new XMLHttpRequest();
+      xhr.open('POST', self.config.url + '/rest/v1/hanyu_data', false);  /* false = 同步 */
+      xhr.setRequestHeader('apikey', self.config.anonKey);
+      xhr.setRequestHeader('Authorization', 'Bearer ' + self.config.anonKey);
+      xhr.setRequestHeader('Content-Type', 'application/json');
+      xhr.setRequestHeader('Prefer', 'resolution=merge-duplicates');
+      xhr.send(jsonStr);
+      console.log('[CloudSync] emergencyPush: status=' + xhr.status);
+    }catch(e){
+      console.log('[CloudSync] emergencyPush error: ' + e.message);
+    }
   }
 };
 
@@ -1520,8 +1636,8 @@ function copySQL(){
 /* ====================================================
    PWA Service Worker 注册（内联模式，无需外部文件）
    ==================================================== */
-var APP_VERSION = 'v3.2';
-var CACHE_VER = 'hanyu-v3.2';
+var APP_VERSION = 'v3.2.1';
+var CACHE_VER = 'hanyu-v3.2.1';
 
 /* 动态生成 manifest 作为 blob URL */
 function setupManifest(){
@@ -1801,14 +1917,14 @@ function quickHealthCheck(key,label){
     renderMemberChips(); return;
   }
   var d=new Date();
-  health.logs.push({id:String(Date.now()),item:key,date:today,time:fmtTime(d),member:state.currentMember});
+  health.logs.push({id:String(Date.now()),item:key,date:today,time:fmtTime(d),member:state.currentMember,_ts:String(Date.now())});
   DB.set('health',health); toast(label+'已打卡✅'); renderModule('home');
 }
 function saveQuickWater(){
   var t=document.getElementById('hw_time').value; if(!t){toast('请填写时间');return;}
   var d=new Date(t);
   var health=DB.get('health',{logs:[],reactions:[]});
-  health.logs.push({id:String(Date.now()),item:'water',date:fmtDate(d),time:fmtTime(d),value:+document.getElementById('hw_value').value||0,member:state.currentMember});
+  health.logs.push({id:String(Date.now()),item:'water',date:fmtDate(d),time:fmtTime(d),value:+document.getElementById('hw_value').value||0,member:state.currentMember,_ts:String(Date.now())});
   DB.set('health',health); closeModal(); toast('💧 饮水已记录✅'); renderModule('home');
 }
 
@@ -1828,7 +1944,7 @@ function quickFeedOnHome(){
 function saveQuickFeed(){
   var t=document.getElementById('qf_time').value; if(!t){toast('请填写时间');return;}
   var d=new Date(t);
-  var rec={id:String(Date.now()),date:fmtDate(d),time:fmtTime(d),amount:+document.getElementById('qf_amount').value||0,canDate:'',member:state.currentMember};
+  var rec={id:String(Date.now()),date:fmtDate(d),time:fmtTime(d),amount:+document.getElementById('qf_amount').value||0,canDate:'',member:state.currentMember,_ts:String(Date.now())};
   var feeding=DB.get('feeding',[]); feeding.push(rec); DB.set('feeding',feeding);
   closeModal(); toast('🍼 喂奶已记录✅'); renderModule('home');
 }
@@ -1848,7 +1964,7 @@ function quickPoopOnHome(){
 function saveQuickPoop(){
   var t=document.getElementById('qp_time').value; if(!t){toast('请填写时间');return;}
   var d=new Date(t);
-  var rec={id:String(Date.now()),type:'poop',date:fmtDate(d),time:fmtTime(d),color:document.getElementById('qp_color').value,volume:document.getElementById('qp_vol').value,note:document.getElementById('qp_note').value,member:state.currentMember};
+  var rec={id:String(Date.now()),type:'poop',date:fmtDate(d),time:fmtTime(d),color:document.getElementById('qp_color').value,volume:document.getElementById('qp_vol').value,note:document.getElementById('qp_note').value,member:state.currentMember,_ts:String(Date.now())};
   var daily=DB.get('daily',[]); daily.push(rec); DB.set('daily',daily);
   closeModal(); toast('💩 排便已记录✅'); renderModule('home');
 }
@@ -2151,7 +2267,7 @@ function addFeeding(){
 function saveFeeding(){
   var t=document.getElementById('f_time').value; if(!t){toast('请填写时间');return;}
   var d=new Date(t);
-  var rec={id:String(Date.now()),date:fmtDate(d),time:fmtTime(d),amount:+document.getElementById('f_amount').value||0,canDate:document.getElementById('f_can').value||'',member:state.currentMember};
+  var rec={id:String(Date.now()),date:fmtDate(d),time:fmtTime(d),amount:+document.getElementById('f_amount').value||0,canDate:document.getElementById('f_can').value||'',member:state.currentMember,_ts:String(Date.now())};
   var feeding=DB.get('feeding',[]); feeding.push(rec); DB.set('feeding',feeding);
   closeModal(); toast('已保存✅'); renderModule('feeding');
 }
@@ -2174,7 +2290,8 @@ function updateFeeding(id){
       feeding[i].date=fmtDate(d); feeding[i].time=fmtTime(d);
       feeding[i].amount=+document.getElementById('f_amount').value||0;
       feeding[i].canDate=document.getElementById('f_can').value||'';
-      feeding[i].member=state.currentMember; break;
+      feeding[i].member=state.currentMember;
+      feeding[i]._ts=String(Date.now()); break;
     }
   }
   DB.set('feeding',feeding); closeModal(); toast('已更新✅'); renderModule('feeding');
@@ -2238,7 +2355,7 @@ function saveSleep(){
   if(!st||!et){toast('请填写时间');return;}
   var sd=new Date(st), ed=new Date(et), mins=Math.round((ed-sd)/60000);
   var dur=mins>=60?Math.floor(mins/60)+'小时'+mins%60+'分':mins+'分钟';
-  var rec={id:String(Date.now()),type:'sleep',date:fmtDate(sd),startTime:fmtTime(sd),endTime:fmtTime(et),duration:dur,member:state.currentMember};
+  var rec={id:String(Date.now()),type:'sleep',date:fmtDate(sd),startTime:fmtTime(sd),endTime:fmtTime(et),duration:dur,member:state.currentMember,_ts:String(Date.now())};
   var daily=DB.get('daily',[]); daily.push(rec); DB.set('daily',daily);
   closeModal(); toast('已保存✅'); renderModule('daily');
 }
@@ -2257,7 +2374,7 @@ function addPoop(){
 function savePoop(){
   var t=document.getElementById('p_time').value; if(!t){toast('请填写时间');return;}
   var d=new Date(t);
-  var rec={id:String(Date.now()),type:'poop',date:fmtDate(d),time:fmtTime(d),color:document.getElementById('p_color').value,volume:document.getElementById('p_vol').value,note:document.getElementById('p_note').value,member:state.currentMember};
+  var rec={id:String(Date.now()),type:'poop',date:fmtDate(d),time:fmtTime(d),color:document.getElementById('p_color').value,volume:document.getElementById('p_vol').value,note:document.getElementById('p_note').value,member:state.currentMember,_ts:String(Date.now())};
   var daily=DB.get('daily',[]); daily.push(rec); DB.set('daily',daily);
   closeModal(); toast('已保存✅'); renderModule('daily');
 }
@@ -2371,7 +2488,7 @@ function addGrowth(){
 }
 function saveGrowth(){
   var date=document.getElementById('g_date').value; if(!date){toast('请选择日期');return;}
-  var rec={id:String(Date.now()),date:date,height:+document.getElementById('g_height').value||0,weight:+document.getElementById('g_weight').value||0,ageMonth:ageMonthsTotal(),member:state.currentMember};
+  var rec={id:String(Date.now()),date:date,height:+document.getElementById('g_height').value||0,weight:+document.getElementById('g_weight').value||0,ageMonth:ageMonthsTotal(),member:state.currentMember,_ts:String(Date.now())};
   var growth=DB.get('growth',[]); growth.push(rec); DB.set('growth',growth);
   closeModal(); toast('已保存✅'); renderModule('growth');
 }
@@ -2388,7 +2505,7 @@ function editGrowth(id){
 }
 function updateGrowth(id){
   var growth=DB.get('growth',[]);
-  for(var i=0;i<growth.length;i++){ if(growth[i].id===id){ growth[i].date=document.getElementById('g_date').value; growth[i].height=+document.getElementById('g_height').value||0; growth[i].weight=+document.getElementById('g_weight').value||0; break; } }
+  for(var i=0;i<growth.length;i++){ if(growth[i].id===id){ growth[i].date=document.getElementById('g_date').value; growth[i].height=+document.getElementById('g_height').value||0; growth[i].weight=+document.getElementById('g_weight').value||0; growth[i]._ts=String(Date.now()); break; } }
   DB.set('growth',growth); closeModal(); toast('已更新✅'); renderModule('growth');
 }
 function delGrowth(id){
@@ -3372,8 +3489,8 @@ function toggleSkill(name){
   var skills=DB.get('skills',[]);
   var idx=-1;
   for(var i=0;i<skills.length;i++){ if(skills[i].name===name){idx=i;break;} }
-  if(idx>=0){ skills[idx].done=!skills[idx].done; if(skills[idx].done){skills[idx].date=todayStr();skills[idx].member=state.currentMember;} }
-  else{ skills.push({id:String(Date.now()),name:name,done:true,date:todayStr(),member:state.currentMember}); }
+  if(idx>=0){ skills[idx].done=!skills[idx].done; if(skills[idx].done){skills[idx].date=todayStr();skills[idx].member=state.currentMember;skills[idx]._ts=String(Date.now());} }
+  else{ skills.push({id:String(Date.now()),name:name,done:true,date:todayStr(),member:state.currentMember,_ts:String(Date.now())}); }
   DB.set('skills',skills); toast('已更新✅'); renderModule('skill');
 }
 function addCustomSkill(){
@@ -3385,7 +3502,7 @@ function saveCustomSkill(){
   var name=document.getElementById('sk_name').value.trim(); if(!name){toast('请输入名称');return;}
   var skills=DB.get('skills',[]);
   if(skills.some(function(x){return x.name===name;})){toast('该技能已存在');return;}
-  skills.push({id:String(Date.now()),name:name,done:false}); DB.set('skills',skills);
+  skills.push({id:String(Date.now()),name:name,done:false,_ts:String(Date.now())}); DB.set('skills',skills);
   closeModal(); toast('已添加✅'); renderModule('skill');
 }
 function delSkill(name){
@@ -3674,62 +3791,61 @@ function init(){
   try {
     setStatus('加载数据中...');
     
-    /* 同步初始化数据（localStorage+IndexedDB备份） */
-    DB.init();
-    
-    /* 数据迁移（保留原有数据，添加新字段） */
-    migrateData();
-    
-    /* 检查应用版本，清理旧缓存 */
-    checkAppVersion();
-    
-    /* PWA: 设置 manifest 和 Service Worker（离线缓存） */
-    setupManifest();
-    setupServiceWorker();
-    
-    /* 检测是否需要先从云端拉取（localStorage 为空 = 新设备/新域名） */
-    var hasLocalData = countLocalData() > 0;
-    
-    if(hasLocalData){
-      /* 本地有数据：直接渲染，云端同步在后台进行 */
-      setStatus('加载完成');
-      renderNav();
-      refreshTopMeta();
-      renderModule('home');
-      setInterval(refreshTopMeta, 60000);
-      setInterval(autoBackupReminder, 1800000);
-      setTimeout(function(){ hideLoading(); }, 300);
-      
-      /* 启动云端同步 */
-      CloudSync.init(function(){
-        renderModule(state.currentModule);
-        refreshTopMeta();
-      });
-    } else {
-      /* 本地无数据（可能是新域名/清缓存）：先从云端拉取再渲染 */
-      setStatus('正在从云端同步数据...');
-      showToastTip && (setTimeout(function(){showToastTip('☁️ 正在拉取云端数据...', 3000);}, 100));
-      
-      CloudSync.init(function(){
-        setStatus('加载完成');
-        renderNav();
-        refreshTopMeta();
-        renderModule('home');
-        setInterval(refreshTopMeta, 60000);
-        setInterval(autoBackupReminder, 1800000);
-        setTimeout(function(){ hideLoading(); }, 300);
-        /* 拉取后刷新当前模块 */
-        renderModule(state.currentModule);
-        refreshTopMeta();
-      });
-    }
-    
-    /* 启动定时轮询同步（每60秒拉取云端最新数据） */
-    startSyncPolling();
-    
-    /* 启动后检查备份提醒 */
-    setTimeout(function(){
-      var dataCount = countLocalData();
+    /* 异步初始化数据（localStorage + IndexedDB恢复） */
+    DB.init(function(){
+      try {
+        /* 数据迁移（保留原有数据，添加新字段） */
+        migrateData();
+        
+        /* 检查应用版本，清理旧缓存 */
+        checkAppVersion();
+        
+        /* PWA: 设置 manifest 和 Service Worker（离线缓存） */
+        setupManifest();
+        setupServiceWorker();
+        
+        /* 检测是否需要先从云端拉取（localStorage 为空 = 新设备/新域名） */
+        var hasLocalData = countLocalData() > 0;
+        
+        if(hasLocalData){
+          /* 本地有数据：直接渲染，云端同步在后台进行 */
+          setStatus('加载完成');
+          renderNav();
+          refreshTopMeta();
+          renderModule('home');
+          setInterval(refreshTopMeta, 60000);
+          setInterval(autoBackupReminder, 1800000);
+          setTimeout(function(){ hideLoading(); }, 300);
+          
+          /* 启动云端同步 */
+          CloudSync.init(function(){
+            renderModule(state.currentModule);
+            refreshTopMeta();
+          });
+        } else {
+          /* 本地无数据（可能是新域名/清缓存）：先从云端拉取再渲染 */
+          setStatus('正在从云端同步数据...');
+          setTimeout(function(){ showToastTip('☁️ 正在拉取云端数据...', 3000); }, 100);
+          
+          CloudSync.init(function(){
+            setStatus('加载完成');
+            renderNav();
+            refreshTopMeta();
+            renderModule('home');
+            setInterval(refreshTopMeta, 60000);
+            setInterval(autoBackupReminder, 1800000);
+            setTimeout(function(){ hideLoading(); }, 300);
+            renderModule(state.currentModule);
+            refreshTopMeta();
+          });
+        }
+        
+        /* 启动定时轮询同步（每60秒拉取云端最新数据） */
+        startSyncPolling();
+        
+        /* 启动后检查备份提醒 */
+        setTimeout(function(){
+          var dataCount = countLocalData();
       if(dataCount > 0){
         var lastBackup = DB.get('lastBackupTime', null);
         var needRemind = false;
@@ -3739,7 +3855,12 @@ function init(){
           showToastTip('💡 建议开启云端同步或导出备份，防止数据丢失', 5000);
         }
       }
-    }, 3000);
+        }, 3000);
+      } catch(e2) {
+        setStatus('初始化错误: ' + e2.message);
+        document.getElementById('loadStatus').style.color = 'red';
+      }
+    });
   } catch(e) {
     setStatus('初始化错误: ' + e.message);
     document.getElementById('loadStatus').style.color = 'red';
@@ -3872,7 +3993,12 @@ function persistDataBeforeBackground(){
     if(typeof DB !== 'undefined' && DB._idbReady && DB._saveQueue.length > 0){
       DB._flushSaveQueue();
     }
-    /* 云端推送未保存的数据 */
+    /* 取消防抖定时器，立即推送 */
+    if(typeof CloudSync !== 'undefined' && CloudSync.debounceTimer){
+      clearTimeout(CloudSync.debounceTimer);
+      CloudSync.debounceTimer = null;
+    }
+    /* 云端推送未保存的数据（异步push） */
     if(typeof CloudSync !== 'undefined' && CloudSync.enabled && !CloudSync.syncing){
       CloudSync.push(function(){});
     }
@@ -3905,7 +4031,19 @@ document.addEventListener('visibilitychange', function(){
 
 /* 兼容旧版iOS的页面隐藏/恢复 */
 window.addEventListener('pagehide', function(){
+  /* 先做常规持久化（IndexedDB + 异步push） */
   persistDataBeforeBackground();
+  /* 再做紧急推送：同步XHR，确保关闭页面前数据已上传云端 */
+  if(typeof CloudSync !== 'undefined' && CloudSync.enabled){
+    CloudSync.emergencyPush();
+  }
+});
+
+/* beforeunload 兜底：部分Android浏览器只触发此事件 */
+window.addEventListener('beforeunload', function(){
+  if(typeof CloudSync !== 'undefined' && CloudSync.enabled){
+    CloudSync.emergencyPush();
+  }
 });
 
 window.addEventListener('pageshow', function(e){
