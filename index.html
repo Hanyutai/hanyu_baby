@@ -1,16 +1,14 @@
+
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="default">
-<meta name="apple-mobile-web-app-title" content="涵予工作台">
 <meta name="mobile-web-app-capable" content="yes">
-<meta name="theme-color" content="#FFB5BA">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="涵予宝宝">
+<meta name="theme-color" content="#FFB5BA">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>涵予宝宝育儿工作台</title>
 <style>
 /* ==================== 全局变量与重置 ==================== */
@@ -200,6 +198,12 @@ tr:active{background:#F8F0EC}
 .toast{position:fixed;top:64px;left:50%;transform:translateX(-50%);background:rgba(0,0,0,0.8);color:#fff;padding:8px 18px;border-radius:20px;font-size:13px;z-index:400;opacity:0;transition:opacity .25s;pointer-events:none;max-width:90%;text-align:center}
 .toast.show{opacity:1}
 
+/* ====== 网络状态横幅 ====== */
+.net-banner{position:fixed;bottom:0;left:0;right:0;z-index:90;background:#FEF3C7;color:#92400E;padding:8px 14px;font-size:12px;display:flex;align-items:center;justify-content:space-between;gap:8px;transform:translateY(100%);transition:transform .3s ease;padding-bottom:calc(8px + env(safe-area-inset-bottom));box-shadow:0 -2px 8px rgba(0,0,0,0.08)}
+.net-banner.show{transform:translateY(0)}
+.net-banner .nb-text{flex:1;display:flex;align-items:center;gap:6px}
+.net-banner .nb-btn{background:#FBBF24;color:#fff;padding:4px 12px;border-radius:10px;font-size:11px;font-weight:600;white-space:nowrap;flex-shrink:0}
+
 .member-bar{display:flex;gap:5px;margin-bottom:10px;flex-wrap:wrap}
 .member-chip{padding:4px 10px;border-radius:14px;font-size:11px;font-weight:600;background:#F5EDE9;color:var(--text-sub);flex-shrink:0}
 .member-chip.active{background:var(--c-pink-deep);color:#fff}
@@ -276,6 +280,11 @@ tr:active{background:#F8F0EC}
 </div>
 
 <div class="toast" id="toast"></div>
+
+<div class="net-banner" id="netBanner">
+  <div class="nb-text"><span>📶</span><span id="netBannerText">网络已断开，当前查看本地数据</span></div>
+  <button class="nb-btn" onclick="retryNetwork()">重试</button>
+</div>
 
 <script>
 /* ====================================================
@@ -1511,7 +1520,8 @@ function copySQL(){
 /* ====================================================
    PWA Service Worker 注册（内联模式，无需外部文件）
    ==================================================== */
-var APP_VERSION = 'v3.1';
+var APP_VERSION = 'v3.2';
+var CACHE_VER = 'hanyu-v3.2';
 
 /* 动态生成 manifest 作为 blob URL */
 function setupManifest(){
@@ -1519,8 +1529,10 @@ function setupManifest(){
     name: '涵予宝宝育儿工作台',
     short_name: '涵予宝宝',
     description: '涵予宝宝专属育儿记录工作台',
-    start_url: '.',
+    start_url: 'https://hanyutai.github.io/hanyu_baby/',
+    scope: 'https://hanyutai.github.io/hanyu_baby/',
     display: 'standalone',
+    orientation: 'portrait',
     background_color: '#FFF9F5',
     theme_color: '#FFB5BA',
     icons: [{
@@ -1553,12 +1565,23 @@ function setupServiceWorker(){
   if(location.protocol !== 'https:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') return;
   
   var swCode = [
-    'var CACHE_VER = "hanyu-v3.1";',
+    'var CACHE_VER = "' + CACHE_VER + '";',
     '',
+    '/* ====== INSTALL: 预缓存应用页面，确保离线兜底 ====== */',
     'self.addEventListener("install", function(e){',
-    '  self.skipWaiting();',
+    '  e.waitUntil(',
+    '    caches.open(CACHE_VER).then(function(cache){',
+    '      /* self.registration.scope 是SW的scope URL，即应用根目录 */',
+    '      return cache.addAll([self.registration.scope]).catch(function(err){',
+    '        console.log("[SW] pre-cache failed:", err.message);',
+    '      });',
+    '    }).then(function(){',
+    '      self.skipWaiting();',
+    '    })',
+    '  );',
     '});',
     '',
+    '/* ====== ACTIVATE: 清理旧缓存，接管客户端 ====== */',
     'self.addEventListener("activate", function(e){',
     '  e.waitUntil(',
     '    caches.keys().then(function(names){',
@@ -1566,31 +1589,44 @@ function setupServiceWorker(){
     '        if(name !== CACHE_VER) return caches.delete(name);',
     '      }));',
     '    }).then(function(){',
-    '      self.clients.claim();',
-    '      return self.clients.matchAll().then(function(clients){',
-    '        clients.forEach(function(c){ c.postMessage({type:"SW_UPDATED", version:CACHE_VER}); });',
-    '      });',
+    '      return self.clients.claim();',
     '    })',
     '  );',
     '});',
     '',
+    '/* ====== FETCH: HTML网络优先+三层兜底，静态资源SWR ====== */',
     'self.addEventListener("fetch", function(e){',
     '  if(e.request.method !== "GET") return;',
     '  var url = new URL(e.request.url);',
     '  if(url.origin !== self.location.origin) return;',
-    '  /* HTML请求: network-first 确保拿到最新版本 */',
-    '  if(e.request.mode === "navigate" || e.request.destination === "document"){',
+    '',
+    '  var isHTML = e.request.mode === "navigate" || e.request.destination === "document";',
+    '',
+    '  if(isHTML){',
     '    e.respondWith(',
     '      fetch(e.request).then(function(response){',
     '        var clone = response.clone();',
     '        caches.open(CACHE_VER).then(function(cache){ cache.put(e.request, clone); });',
     '        return response;',
     '      }).catch(function(){',
-    '        return caches.match(e.request);',
+    '        /* 第一层：精确缓存匹配 */',
+    '        return caches.match(e.request).then(function(cached){',
+    '          if(cached) return cached;',
+    '          /* 第二层：scope缓存匹配（预缓存的页面） */',
+    '          return caches.match(self.registration.scope).then(function(fallback){',
+    '            if(fallback) return fallback;',
+    '            /* 第三层：内联离线HTML */',
+    '            return new Response(',
+    '              "<html><head><meta charset=\\"utf-8\\"><meta name=\\"viewport\\" content=\\"width=device-width,initial-scale=1,viewport-fit=cover\\"></head><body style=\\"font-family:-apple-system,sans-serif;text-align:center;padding:40px 20px;background:#FFF9F5\\"><div style=\\"font-size:48px\\">👶</div><h2 style=\\"color:#C42B5A;margin:12px 0\\">涵予宝宝</h2><p style=\\"color:#999\\">当前处于离线状态</p><p style=\\"color:#ccc;font-size:13px\\">请检查网络后重试</p><button onclick=\\"location.reload()\\" style=\\"margin-top:16px;padding:10px 24px;background:#FFB5BA;border:none;border-radius:8px;color:#fff;font-size:14px\\">🔄 重试</button></body></html>",',
+    '              {headers: {"Content-Type": "text/html; charset=utf-8"}}',
+    '            );',
+    '          });',
+    '        });',
     '      })',
     '    );',
     '    return;',
     '  }',
+    '',
     '  /* 静态资源: stale-while-revalidate */',
     '  e.respondWith(',
     '    caches.open(CACHE_VER).then(function(cache){',
@@ -1622,20 +1658,17 @@ function setupServiceWorker(){
         if(newWorker){
           newWorker.addEventListener('statechange', function(){
             if(newWorker.state === 'installed' && navigator.serviceWorker.controller){
-              showToastTip('应用已更新，正在刷新...', 3000);
-              setTimeout(function(){ location.reload(); }, 1000);
+              /* 非阻断式提示，不强制reload */
+              showToastTip('应用有新版本，下次打开自动生效', 4000);
             }
           });
-        }
-      });
-      navigator.serviceWorker.addEventListener('message', function(e){
-        if(e.data && e.data.type === 'SW_UPDATED'){
-          showToastTip('已更新到最新版本', 3000);
         }
       });
     }).catch(function(e){
       console.log('[PWA] SW注册失败: ' + e.message);
     });
+    /* 10秒后清理Blob URL防内存泄漏 */
+    setTimeout(function(){ URL.revokeObjectURL(swUrl); }, 10000);
   }catch(e){
     console.log('[PWA] SW初始化失败: ' + e.message);
   }
@@ -3626,7 +3659,7 @@ function checkAppVersion(){
     if('caches' in window){
       caches.keys().then(function(names){
         names.forEach(function(name){
-          if(name !== 'hanyu-v3.1') caches.delete(name);
+          if(name !== CACHE_VER) caches.delete(name);
         });
       });
     }
@@ -3650,20 +3683,46 @@ function init(){
     /* 检查应用版本，清理旧缓存 */
     checkAppVersion();
     
-    setStatus('加载完成');
-    renderNav();
-    refreshTopMeta();
-    renderModule('home');
-    setInterval(refreshTopMeta, 60000);
-    setInterval(autoBackupReminder, 1800000);
-    setTimeout(function(){ hideLoading(); }, 300);
+    /* PWA: 设置 manifest 和 Service Worker（离线缓存） */
+    setupManifest();
+    setupServiceWorker();
     
-    /* 启动云端同步 */
-    CloudSync.init(function(){
-      /* 云端同步完成后刷新页面 */
-      renderModule(state.currentModule);
+    /* 检测是否需要先从云端拉取（localStorage 为空 = 新设备/新域名） */
+    var hasLocalData = countLocalData() > 0;
+    
+    if(hasLocalData){
+      /* 本地有数据：直接渲染，云端同步在后台进行 */
+      setStatus('加载完成');
+      renderNav();
       refreshTopMeta();
-    });
+      renderModule('home');
+      setInterval(refreshTopMeta, 60000);
+      setInterval(autoBackupReminder, 1800000);
+      setTimeout(function(){ hideLoading(); }, 300);
+      
+      /* 启动云端同步 */
+      CloudSync.init(function(){
+        renderModule(state.currentModule);
+        refreshTopMeta();
+      });
+    } else {
+      /* 本地无数据（可能是新域名/清缓存）：先从云端拉取再渲染 */
+      setStatus('正在从云端同步数据...');
+      showToastTip && (setTimeout(function(){showToastTip('☁️ 正在拉取云端数据...', 3000);}, 100));
+      
+      CloudSync.init(function(){
+        setStatus('加载完成');
+        renderNav();
+        refreshTopMeta();
+        renderModule('home');
+        setInterval(refreshTopMeta, 60000);
+        setInterval(autoBackupReminder, 1800000);
+        setTimeout(function(){ hideLoading(); }, 300);
+        /* 拉取后刷新当前模块 */
+        renderModule(state.currentModule);
+        refreshTopMeta();
+      });
+    }
     
     /* 启动定时轮询同步（每60秒拉取云端最新数据） */
     startSyncPolling();
@@ -3734,6 +3793,131 @@ exportData = function(){
   _originalExportData();
   DB.set('lastBackupTime', new Date().toISOString());
 };
+
+/* ====================================================
+   网络状态管理（非阻断式）
+   ==================================================== */
+var _isOnline = navigator.onLine !== false;
+
+function updateNetworkStatus(){
+  var wasOnline = _isOnline;
+  _isOnline = navigator.onLine !== false;
+  var banner = document.getElementById('netBanner');
+  if(!banner) return;
+  
+  if(!_isOnline){
+    /* 离线：显示底部横幅（非阻断） */
+    banner.classList.add('show');
+    var txt = document.getElementById('netBannerText');
+    if(txt) txt.textContent = '网络已断开，当前查看本地数据';
+    /* 暂停云端同步轮询，省电防错 */
+    if(typeof _syncPollTimer !== 'undefined' && _syncPollTimer){
+      clearInterval(_syncPollTimer);
+      _syncPollTimer = null;
+    }
+  } else {
+    /* 在线：隐藏横幅 */
+    banner.classList.remove('show');
+    /* 恢复云端同步轮询 */
+    if(typeof startSyncPolling === 'function' && !_syncPollTimer){
+      startSyncPolling();
+    }
+    /* 刚恢复在线：触发一次同步 */
+    if(!wasOnline && typeof CloudSync !== 'undefined' && CloudSync.enabled){
+      CloudSync.pull(function(ok){
+        if(ok) renderModule(state.currentModule);
+      });
+    }
+  }
+}
+
+function retryNetwork(){
+  if(navigator.onLine){
+    updateNetworkStatus();
+    if(typeof CloudSync !== 'undefined' && CloudSync.enabled){
+      CloudSync.manualSync(function(ok, msg){
+        if(ok){
+          showToastTip('☁️ 同步成功', 2000);
+          renderModule(state.currentModule);
+        } else {
+          showToastTip('❌ ' + msg, 3000);
+        }
+      });
+    } else {
+      showToastTip('网络已恢复', 2000);
+    }
+  } else {
+    showToastTip('仍处于离线状态', 2000);
+  }
+}
+
+window.addEventListener('online', updateNetworkStatus);
+window.addEventListener('offline', updateNetworkStatus);
+setTimeout(updateNetworkStatus, 500);
+
+/* ====================================================
+   iOS PWA 生命周期处理
+   ==================================================== */
+
+/* 检测是否在PWA standalone模式 */
+function isStandalonePWA(){
+  return (window.navigator.standalone === true) ||
+         (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+}
+
+/* 应用进入后台前持久化数据 */
+function persistDataBeforeBackground(){
+  try{
+    /* 刷新IndexedDB保存队列 */
+    if(typeof DB !== 'undefined' && DB._idbReady && DB._saveQueue.length > 0){
+      DB._flushSaveQueue();
+    }
+    /* 云端推送未保存的数据 */
+    if(typeof CloudSync !== 'undefined' && CloudSync.enabled && !CloudSync.syncing){
+      CloudSync.push(function(){});
+    }
+  }catch(e){
+    console.log('[PWA] persistDataBeforeBackground error: ' + e.message);
+  }
+}
+
+/* 应用进入后台/恢复前台 */
+document.addEventListener('visibilitychange', function(){
+  if(document.visibilityState === 'hidden'){
+    /* 进入后台：持久化数据 */
+    persistDataBeforeBackground();
+  } else if(document.visibilityState === 'visible'){
+    /* 恢复前台：延迟300ms刷新（等iOS解冻webview） */
+    setTimeout(function(){
+      updateNetworkStatus();
+      if(typeof state !== 'undefined' && state.currentModule){
+        renderModule(state.currentModule);
+        refreshTopMeta();
+      }
+      if(navigator.onLine !== false && typeof CloudSync !== 'undefined' && CloudSync.enabled){
+        CloudSync.pull(function(ok){
+          if(ok) renderModule(state.currentModule);
+        });
+      }
+    }, 300);
+  }
+});
+
+/* 兼容旧版iOS的页面隐藏/恢复 */
+window.addEventListener('pagehide', function(){
+  persistDataBeforeBackground();
+});
+
+window.addEventListener('pageshow', function(e){
+  if(e.persisted){
+    /* 从bfcache恢复 */
+    setTimeout(function(){
+      updateNetworkStatus();
+      renderModule(state.currentModule);
+      refreshTopMeta();
+    }, 300);
+  }
+});
 
 document.addEventListener('DOMContentLoaded', init);
 
